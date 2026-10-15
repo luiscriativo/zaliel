@@ -1,0 +1,12 @@
+{
+  "name": "@zaliel/renderer",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Desenho do canvas com Skia (CanvasKit/WebAssembly).",
+  "type": "module",
+  "main": "src/index.ts",
+  "dependencies": {
+    "@zaliel/core": "*",
+    "canvaskit-wasm": "^0.42.0"
+  }
+}

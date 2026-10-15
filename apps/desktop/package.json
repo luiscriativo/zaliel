@@ -1,0 +1,36 @@
+{
+  "name": "@zaliel/desktop",
+  "productName": "Zaliel",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Editor de interfaces offline — sem IA, sem nuvem.",
+  "author": "Luis Melo <luiscriativo@gmail.com>",
+  "license": "UNLICENSED",
+  "homepage": "https://github.com/luiscriativo/zaliel",
+  "main": "out/main/index.js",
+  "scripts": {
+    "dev": "electron-vite dev",
+    "build": "electron-vite build",
+    "preview": "electron-vite preview",
+    "icons": "node scripts/make-icons.mjs",
+    "dist": "electron-vite build && electron-builder --publish never",
+    "dist:win": "electron-vite build && electron-builder --win --x64 --publish never"
+  },
+  "dependencies": {
+    "electron-updater": "^6.8.9"
+  },
+  "devDependencies": {
+    "@zaliel/core": "*",
+    "@zaliel/editor": "*",
+    "@zaliel/renderer": "*",
+    "@types/node": "^22.15.0",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@vitejs/plugin-react": "^6.1.2",
+    "electron": "44.7.2",
+    "electron-builder": "^26.15.3",
+    "electron-vite": "^6.0.0",
+    "sharp": "^0.35.5",
+    "vite": "^8.3.4"
+  }
+}

@@ -1,0 +1,89 @@
+# electron-builder — https://www.electron.build/configuration/configuration
+# Os instaladores são gerados pelo GitHub Actions (.github/workflows/release.yml),
+# uma máquina por sistema/arquitetura.
+
+appId: io.github.luiscriativo.zaliel
+productName: Zaliel
+copyright: Copyright © 2026 Luis Melo
+
+directories:
+  buildResources: build
+  output: dist
+
+asar: true
+files:
+  - out/**/*
+  - package.json
+  - "!**/*.map"
+
+extraResources:
+  - from: ../../LICENSE
+    to: LICENSE.txt
+
+# Arquivos .zal abrem no Zaliel com duplo clique (Windows, macOS e Linux)
+fileAssociations:
+  - ext: zal
+    name: Documento Zaliel
+    description: Documento de design do Zaliel
+    mimeType: application/x-zaliel
+    role: Editor
+
+# ── Atualização (src/main/updater.ts) ────────────────────────────────────────
+# Gera os latest*.yml que o app lê quando o usuário pede para verificar.
+publish:
+  provider: github
+  owner: luiscriativo
+  repo: zaliel
+  releaseType: release
+
+# ── macOS: assinatura ad-hoc sem certificado (ver scripts/adhoc-sign.cjs) ────
+afterSign: scripts/adhoc-sign.cjs
+
+# Nomes no padrão Zaliel-<versão>-<sistema>-<arquitetura>
+win:
+  executableName: Zaliel
+  icon: build/icon.png
+  target:
+    - target: nsis
+      arch: [x64, arm64]
+    - target: portable
+      arch: [x64]
+
+nsis:
+  artifactName: ${productName}-${version}-win-${arch}-setup.${ext}
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: Zaliel
+  deleteAppDataOnUninstall: false
+
+portable:
+  artifactName: ${productName}-${version}-win-${arch}-portable.${ext}
+
+mac:
+  icon: build/icon.png
+  category: public.app-category.graphics-design
+  notarize: false
+  artifactName: ${productName}-${version}-mac-${arch}.${ext}
+  target:
+    - target: dmg
+      arch: [x64, arm64]
+
+dmg:
+  title: Zaliel
+  iconSize: 80
+  window:
+    width: 540
+    height: 380
+
+linux:
+  icon: build/icon.png
+  executableName: zaliel
+  category: Graphics
+  maintainer: Luis Melo <luiscriativo@gmail.com>
+  artifactName: ${productName}-${version}-linux-${arch}.${ext}
+  target:
+    - target: AppImage
+    - target: deb
+    - target: rpm

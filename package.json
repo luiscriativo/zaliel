@@ -1,0 +1,21 @@
+{
+  "name": "zaliel-monorepo",
+  "private": true,
+  "type": "module",
+  "description": "Zaliel — editor de interfaces offline, sem IA",
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
+  "scripts": {
+    "dev": "npm run dev -w @zaliel/desktop",
+    "build": "npm run build -w @zaliel/desktop",
+    "dist": "npm run dist -w @zaliel/desktop",
+    "test": "vitest run",
+    "check": "tsc -p tsconfig.json --noEmit"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.3",
+    "vitest": "^5.0.4"
+  }
+}

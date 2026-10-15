@@ -1,0 +1,11 @@
+{
+  "name": "@zaliel/core",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Modelo do documento .zal: schema, operações, histórico, layout e componentes. Sem UI e sem rede.",
+  "type": "module",
+  "main": "src/index.ts",
+  "dependencies": {
+    "zod": "^4.6.7"
+  }
+}

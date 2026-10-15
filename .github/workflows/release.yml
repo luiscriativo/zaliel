@@ -1,0 +1,262 @@
+# Release do Zaliel
+#
+# Como lançar uma versão (um clique, nada a fazer no computador):
+#   Actions → Release → Run workflow → escolha o tipo de versão → Run workflow
+#     patch  1.0.0 → 1.0.1   só correções
+#     minor  1.0.0 → 1.1.0   funcionalidades novas
+#     major  1.0.0 → 2.0.0   mudança grande
+#     teste  só gera os builds (artefatos do run), sem versão nem release
+# O workflow checa o código, gera os instaladores de cada sistema e, só se tudo
+# passar, grava a versão nova no package.json (commit "Versão X.Y.Z" na main),
+# cria a tag e publica a release — os apps instalados já veem a atualização.
+# Desmarcando "Publicar", a release fica como rascunho para revisar antes.
+# Depois, no GitKraken/VS Code, faça Pull para trazer o commit da versão.
+#
+# Também funciona enviando uma tag (versão já atualizada no package.json):
+#   git tag v1.0.0 && git push origin v1.0.0   → cria um rascunho
+#
+# Gera Windows (x64: instalador e portátil; ARM), macOS (Apple Silicon e Intel) e
+# Linux (x64 e ARM: AppImage, .deb e .rpm). Os arquivos seguem o padrão
+# Zaliel-<versão>-<sistema>-<arquitetura>.
+#
+# Uma máquina por arquitetura: dependências nativas/binários embutidos são
+# baixados para a arquitetura de quem faz o build. Cada build gera o seu
+# latest*.yml e o scripts/merge-update-info.cjs junta os de cada máquina num só
+# por sistema (é o que a atualização automática lê).
+# Monorepo: o app fica em apps/desktop (versão, build e instaladores saem de lá).
+
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      versao:
+        description: 'Tipo de versão (patch = correções, minor = novidades, major = mudança grande, teste = só builds)'
+        type: choice
+        options: [patch, minor, major, teste]
+        default: patch
+      publicar:
+        description: 'Publicar direto (desmarque para deixar como rascunho e revisar antes)'
+        type: boolean
+        default: true
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  prepare:
+    name: Versão
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      release: ${{ steps.v.outputs.release }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: v
+        name: Calcular a versão
+        env:
+          BUMP: ${{ inputs.versao }}
+        run: |
+          CURRENT="$(node -p "require('./apps/desktop/package.json').version")"
+          if [ "$GITHUB_REF_TYPE" = "tag" ]; then
+            # Tag enviada à mão: a versão já está no package.json
+            if [ "v$CURRENT" != "$GITHUB_REF_NAME" ]; then
+              echo "::error::A tag $GITHUB_REF_NAME não bate com a versão do package.json (v$CURRENT)."
+              exit 1
+            fi
+            VERSION="$CURRENT"; RELEASE=true
+          elif [ "$BUMP" = "teste" ]; then
+            VERSION="$CURRENT"; RELEASE=false
+          else
+            if [ "$GITHUB_REF_NAME" != "main" ]; then
+              echo "::error::Lance versões a partir da branch main (o run foi em $GITHUB_REF_NAME)."
+              exit 1
+            fi
+            VERSION="$(npx --yes semver@7 -i "$BUMP" "$CURRENT")"; RELEASE=true
+            if git ls-remote --exit-code --tags origin "refs/tags/v$VERSION" >/dev/null; then
+              echo "::error::A tag v$VERSION já existe no GitHub."
+              exit 1
+            fi
+          fi
+          echo "Versão: $CURRENT → $VERSION (release: $RELEASE)"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "release=$RELEASE" >> "$GITHUB_OUTPUT"
+
+  check:
+    name: Checagem
+    needs: prepare
+    runs-on: ubuntu-latest
+    env:
+      ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Sintaxe / tipos
+        run: npm run check
+      - name: Testes
+        run: npm test
+
+  build:
+    name: Build ${{ matrix.name }}
+    needs: [prepare, check]
+    runs-on: ${{ matrix.os }}
+    # Um build leva ~10 min; se a máquina do GitHub travar (ex.: no npm ci),
+    # falha logo em vez de esperar o limite padrão de 6 horas
+    timeout-minutes: 45
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - name: mac-arm64
+            os: macos-15
+            args: --mac dmg --arm64
+          - name: mac-x64
+            os: macos-15-intel
+            args: --mac dmg --x64
+          - name: win-x64
+            os: windows-latest
+            args: --win nsis portable --x64
+          - name: win-arm64
+            os: windows-11-arm
+            args: --win nsis --arm64
+          - name: linux-x64
+            os: ubuntu-latest
+            args: --linux AppImage deb rpm --x64
+          - name: linux-arm64
+            os: ubuntu-24.04-arm
+            args: --linux AppImage deb rpm --arm64
+    env:
+      # Sem certificado: o macOS recebe assinatura ad-hoc (scripts/adhoc-sign.js).
+      # Com um Developer ID, configure CSC_LINK / CSC_KEY_PASSWORD como secrets e remova esta linha.
+      CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Dependências do Linux
+        # rpm: para gerar o .rpm. Na máquina ARM o electron-builder não tem o fpm
+        # (ferramenta do .deb/.rpm) pronto para baixar: usa o instalado aqui.
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q rpm libarchive-tools
+          if [ "$(uname -m)" = "aarch64" ]; then
+            sudo apt-get install -y -q ruby ruby-dev build-essential
+            sudo gem install --no-document fpm
+            echo "USE_SYSTEM_FPM=true" >> "$GITHUB_ENV"
+          fi
+      - name: Instalar dependências
+        # Limite + uma nova tentativa: travamentos de rede no npm ci acontecem nas máquinas do GitHub
+        timeout-minutes: 12
+        run: npm ci || (echo "::warning::npm ci falhou, tentando de novo" && npm ci)
+      - name: Versão ${{ needs.prepare.outputs.version }}
+        # Só nesta máquina: o commit da versão é feito no fim, se tudo passar
+        working-directory: apps/desktop
+        run: npm version ${{ needs.prepare.outputs.version }} --no-git-tag-version --allow-same-version
+      - name: Ícones
+        working-directory: apps/desktop
+        run: npm run icons
+      - name: Compilar (electron-vite)
+        working-directory: apps/desktop
+        run: npm run build
+      - name: Empacotar
+        working-directory: apps/desktop
+        run: npx electron-builder ${{ matrix.args }} --publish never
+      - uses: actions/upload-artifact@v4
+        with:
+          name: build-${{ matrix.name }}
+          if-no-files-found: error
+          retention-days: 7
+          # .blockmap só do Windows: é o que permite baixar só a diferença na atualização
+          path: |
+            apps/desktop/dist/*.exe
+            apps/desktop/dist/*.exe.blockmap
+            apps/desktop/dist/*.dmg
+            apps/desktop/dist/*.AppImage
+            apps/desktop/dist/*.deb
+            apps/desktop/dist/*.rpm
+            apps/desktop/dist/latest*.yml
+
+  release:
+    name: Release
+    needs: [prepare, build]
+    if: needs.prepare.outputs.release == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      VERSION: ${{ needs.prepare.outputs.version }}
+      TAG: v${{ needs.prepare.outputs.version }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: build-*
+          path: builds
+      - name: Juntar os builds
+        run: |
+          npm install --prefix "$RUNNER_TEMP/yaml" --no-save --no-package-lock js-yaml@4
+          NODE_PATH="$RUNNER_TEMP/yaml/node_modules" node scripts/merge-update-info.cjs builds "$RUNNER_TEMP/release"
+      - name: Somas de verificação e tabela de downloads
+        run: |
+          cd "$RUNNER_TEMP/release"
+          sha256sum -- * > SHA256SUMS.txt
+          V="$VERSION"; R="https://github.com/${GITHUB_REPOSITORY}/releases/download/v$V"; A="Zaliel"
+          {
+            echo "## Downloads"
+            echo
+            echo "| Sistema | Arquivo |"
+            echo "|---|---|"
+            echo "| **Windows** (a maioria dos PCs) | [$A-$V-win-x64-setup.exe]($R/$A-$V-win-x64-setup.exe) · [portátil]($R/$A-$V-win-x64-portable.exe) |"
+            echo "| **Windows on ARM** | [$A-$V-win-arm64-setup.exe]($R/$A-$V-win-arm64-setup.exe) |"
+            echo "| **macOS** Apple Silicon (M1 ou mais novo) | [$A-$V-mac-arm64.dmg]($R/$A-$V-mac-arm64.dmg) |"
+            echo "| **macOS** Intel | [$A-$V-mac-x64.dmg]($R/$A-$V-mac-x64.dmg) |"
+            echo "| **Linux** x64 | [AppImage]($R/$A-$V-linux-x86_64.AppImage) · [.deb]($R/$A-$V-linux-amd64.deb) · [.rpm]($R/$A-$V-linux-x86_64.rpm) |"
+            echo "| **Linux** ARM | [AppImage]($R/$A-$V-linux-arm64.AppImage) · [.deb]($R/$A-$V-linux-arm64.deb) · [.rpm]($R/$A-$V-linux-aarch64.rpm) |"
+            echo
+            echo "**Já usa o $A?** Em **Ajuda → Verificar atualizações** o app encontra esta versão (ele nunca se conecta sozinho): no Windows (e no AppImage) ela é baixada e instalada pelo próprio app; no Mac e nos pacotes .deb/.rpm abre esta página."
+            echo
+            echo "macOS: o app não é notarizado — na primeira vez, clique com o botão direito → **Abrir**. Windows: o SmartScreen pode pedir confirmação (**Mais informações → Executar assim mesmo**). Somas SHA-256: \`SHA256SUMS.txt\`."
+            echo
+          } > "$RUNNER_TEMP/notes.md"
+          ls -la
+      - name: Gravar a versão (commit + tag)
+        # Run workflow: grava a versão nova na main e cria a tag, juntos (--atomic).
+        # Se a main recebeu commits durante o run, o push falha e nada é gravado:
+        # é só rodar de novo. Push com o token do workflow não dispara outro run.
+        if: github.ref_type != 'tag'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          (cd apps/desktop && npm version "$VERSION" --no-git-tag-version)
+          git commit -am "Versão $VERSION"
+          git tag "$TAG"
+          git push --atomic origin HEAD:main "refs/tags/$TAG"
+      - name: Criar a release
+        # Anexa tudo com a release ainda em rascunho: os apps instalados só a
+        # enxergam completa, depois de publicada
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" "$RUNNER_TEMP"/release/* --clobber
+          else
+            gh release create "$TAG" "$RUNNER_TEMP"/release/* --draft --title "Zaliel $VERSION" --notes-file "$RUNNER_TEMP/notes.md" --generate-notes
+          fi
+      - name: Publicar
+        if: github.ref_type != 'tag' && inputs.publicar
+        run: gh release edit "$TAG" --draft=false --latest

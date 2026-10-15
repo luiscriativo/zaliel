@@ -1,0 +1,19 @@
+{
+  "name": "@zaliel/editor",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Interface do editor (React).",
+  "type": "module",
+  "main": "src/index.ts",
+  "dependencies": {
+    "@zaliel/core": "*",
+    "@zaliel/renderer": "*",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1",
+    "lucide-react": "^1.57.0",
+    "@fontsource/inter": "^5.3.0",
+    "@fontsource/cormorant-garamond": "^5.3.0",
+    "@expo-google-fonts/inter": "^0.4.2",
+    "canvaskit-wasm": "^0.42.0"
+  }
+}

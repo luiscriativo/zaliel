@@ -1,0 +1,11 @@
+Copyright (c) 2026 Luis Melo. Todos os direitos reservados.
+
+Este software e seus arquivos-fonte são de uso exclusivo do titular e de quem
+ele autorizar por escrito. É proibido copiar, modificar, distribuir ou
+sublicenciar sem autorização prévia.
+
+Componentes de terceiros mantêm as próprias licenças:
+- Skia / CanvasKit (BSD-3-Clause)
+- Inter (SIL Open Font License 1.1)
+- Cormorant Garamond (SIL Open Font License 1.1)
+- Electron, React, Lucide e demais dependências (MIT/ISC)
