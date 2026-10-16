@@ -4,6 +4,8 @@
 import { z } from 'zod';
 import { FORMAT_VERSION, type ContainerNode, type LinkedLibrary, type SceneNode, type ZalDocument } from './types';
 import { walk } from './document';
+import { normalizeRuns } from './text';
+import { normalizeSides } from './strokes';
 
 export const EXTENSION = 'zal';
 
@@ -11,6 +13,19 @@ const hex = z.string().regex(/^#([0-9a-f]{6}|[0-9a-f]{8})$/i, 'cor inválida (us
 const num = z.number().refine(Number.isFinite, 'número inválido');
 
 const nodeTypes = ['frame', 'group', 'rect', 'ellipse', 'line', 'polygon', 'star', 'path', 'text', 'component', 'component-set', 'boolean', 'instance'] as const;
+
+/** Trecho de estilo de um texto: só os limites e o tipo de cada campo são conferidos. */
+const RunSchema = z.looseObject({
+  start: num.min(0),
+  end: num.min(0),
+  family: z.string().optional(),
+  weight: num.optional(),
+  italic: z.boolean().optional(),
+  size: num.min(0).optional(),
+  letterSpacing: num.optional(),
+  decoration: z.enum(['none', 'underline', 'strikethrough']).optional(),
+  color: hex.optional(),
+});
 
 const NodeSchema: z.ZodType<unknown> = z.lazy(() =>
   z.looseObject({
@@ -23,6 +38,7 @@ const NodeSchema: z.ZodType<unknown> = z.lazy(() =>
     height: num.min(0),
     children: z.array(NodeSchema).optional(),
     text: z.string().optional(),
+    runs: z.array(RunSchema).optional(),
     componentId: z.string().optional(),
   }),
 );
@@ -94,12 +110,41 @@ export function parse(text: string): ZalDocument {
   }
   const doc = res.data as unknown as ZalDocument;
   checkUniqueIds(doc);
+  fixRuns(doc);
   return doc;
 }
 
 function migrate(raw: Record<string, unknown>): Record<string, unknown> {
   // versão 1 é a primeira; migrações futuras entram aqui, uma por versão
+  if (Array.isArray(raw.pages)) for (const p of raw.pages as { children?: unknown }[]) fixStrokeSides(p?.children);
   return { ...raw, version: FORMAT_VERSION };
+}
+
+/** Espessura por lado escrita à mão ou por outra ferramenta: completa os lados que faltam e descarta o que não for objeto. */
+function fixStrokeSides(list: unknown): void {
+  if (!Array.isArray(list)) return;
+  for (const n of list as Record<string, unknown>[]) {
+    if (!n || typeof n !== 'object') continue;
+    if (Array.isArray(n.strokes)) {
+      for (const s of n.strokes as Record<string, unknown>[]) {
+        if (!s || typeof s !== 'object' || !('sides' in s)) continue;
+        const d = normalizeSides(s.sides);
+        if (d) s.sides = d;
+        else delete s.sides;
+      }
+    }
+    fixStrokeSides(n.children);
+  }
+}
+
+/** Trechos de texto fora do lugar (texto editado à mão no arquivo, por exemplo) são ajustados em vez de recusados. */
+function fixRuns(doc: ZalDocument) {
+  for (const p of doc.pages) walk(p.children, (n) => {
+    if (n.type !== 'text' || n.runs === undefined) return;
+    const runs = normalizeRuns(n.runs, n.text.length, n.style);
+    if (runs.length) n.runs = runs;
+    else delete n.runs;
+  });
 }
 
 function checkUniqueIds(doc: ZalDocument) {

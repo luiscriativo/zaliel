@@ -1161,6 +1161,60 @@ kbd {
   white-space: pre-wrap;
   overflow-wrap: break-word;
 }
+/* barra de estilos da seleção, acima do texto em edição */
+.text-format-bar {
+  position: absolute;
+  display: flex;
+  align-items: center;
+  gap: 1px;
+  background: var(--bg-raised);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-s);
+  box-shadow: var(--shadow);
+  padding: 2px;
+  z-index: 6;
+}
+.text-format-bar button {
+  border: 0;
+  background: none;
+  width: 26px;
+  height: 24px;
+  border-radius: 4px;
+  color: var(--text-2);
+  display: grid;
+  place-items: center;
+}
+.text-format-bar button:hover {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+.text-format-color {
+  width: 26px;
+  height: 24px;
+  display: grid;
+  place-items: center;
+  border-radius: 4px;
+  cursor: pointer;
+}
+.text-format-color:hover {
+  background: var(--bg-hover);
+}
+.text-format-color input {
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  border: 1px solid var(--line-strong);
+  border-radius: 50%;
+  background: none;
+  cursor: pointer;
+}
+.text-format-color input::-webkit-color-swatch-wrapper {
+  padding: 0;
+}
+.text-format-color input::-webkit-color-swatch {
+  border: 0;
+  border-radius: 50%;
+}
 .drop-hint {
   position: absolute;
   inset: 12px;
@@ -1835,9 +1889,22 @@ kbd {
   align-items: center;
   gap: 10px;
   height: 44px;
-  padding: 0 12px 0 16px;
+  padding: 0 140px 0 16px; /* espaço dos botões nativos da janela */
   border-bottom: 1px solid #23211e;
   background: #151412;
+  /* arrasta a janela como a barra de título; sem isso a barra de baixo (escondida) ficava com os cliques */
+  -webkit-app-region: drag;
+}
+.present-bar.mac {
+  padding-left: 84px;
+  padding-right: 12px;
+}
+.present-bar > * {
+  -webkit-app-region: no-drag;
+}
+.present-stage,
+.present-foot {
+  -webkit-app-region: no-drag;
 }
 .present-bar .btn {
   color: #ebe6dc;

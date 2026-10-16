@@ -4,7 +4,7 @@
 import type { SceneNode, ZalDocument } from './types';
 import { DocIndex } from './document';
 import { applyOp, type Op } from './ops';
-import { layoutNode, type Change, type MeasureText } from './layout';
+import { layoutNode, type Change, type LayoutContext, type MeasureText } from './layout';
 
 export interface Step {
   label: string;
@@ -24,6 +24,8 @@ export class Model {
   /** Passo do histórico que corresponde ao que está gravado no disco. */
   private savedStep: Step | null | undefined = null;
   measureText?: MeasureText;
+  /** Medida das instâncias que abraçam o conteúdo (o editor sabe achar os componentes). */
+  measureInstance?: LayoutContext['measureInstance'];
   private listeners = new Set<Listener>();
   private limit = 300;
   private mergeKey: string | null = null;
@@ -158,7 +160,7 @@ export class Model {
    * Com `pageIds`, só nessas páginas (arquivos grandes abrem bem mais rápido).
    */
   refreshLayout(pageIds?: string[]): void {
-    const ctx = { measureText: this.measureText, changes: [] as Change[] };
+    const ctx = { measureText: this.measureText, measureInstance: this.measureInstance, changes: [] as Change[] };
     for (const page of this.doc.pages) {
       if (pageIds && !pageIds.includes(page.id)) continue;
       for (const n of page.children) layoutNode(n, ctx);
@@ -189,7 +191,7 @@ export class Model {
     if (ops.some((o) => o.op === 'remove' || o.op === 'move' || o.op === 'doc')) {
       for (const page of this.doc.pages) for (const n of page.children) roots.add(n);
     }
-    const ctx = { measureText: this.measureText, changes: [] as Change[] };
+    const ctx = { measureText: this.measureText, measureInstance: this.measureInstance, changes: [] as Change[] };
     for (const r of roots) if (this.index.get(r.id)) layoutNode(r, ctx);
     return ctx.changes;
   }

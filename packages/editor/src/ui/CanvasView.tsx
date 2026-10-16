@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
-import { Minus, Plus, ClipboardPaste } from 'lucide-react';
-import { apply, multiply, nodeMatrix, parseHex, type Mat, type SceneNode, type TextNode } from '@zaliel/core';
+import { Minus, Plus, ClipboardPaste, Bold, Italic, Underline, Strikethrough, Eraser } from 'lucide-react';
+import { apply, multiply, nodeMatrix, parseHex, applyRunStyle, runsAfterEdit, segmentsIn, type Mat, type RunAttrs, type SceneNode, type TextNode, type TextRun } from '@zaliel/core';
 import type { Editor } from '../editor';
 import { useEditor } from './hooks';
 import { Interaction, findResolved } from '../engine/interaction';
@@ -153,6 +153,8 @@ function TextEditor({ id, onDone }: { id: string; onDone: () => void }) {
   const node = (inner ? findResolved(ed, instanceId!, id) : ed.model.index.get(id)) as TextNode | null;
   const initial = useRef(node?.text ?? '');
   const merge = useRef(`text-${id}-${Date.now()}`);
+  // com trechos de estilo, o canvas continua mostrando o texto e o campo fica só com o cursor e a seleção
+  const rich = !!node?.runs?.length;
 
   useEffect(() => {
     const el = ref.current;
@@ -160,6 +162,14 @@ function TextEditor({ id, onDone }: { id: string; onDone: () => void }) {
     el.focus();
     el.select();
   }, []);
+
+  useEffect(() => {
+    ed.editingTextShown = rich;
+    ed.emit('view');
+    return () => {
+      ed.editingTextShown = false;
+    };
+  }, [rich, ed]);
 
   if (!node || node.type !== 'text') {
     queueMicrotask(onDone);
@@ -177,10 +187,50 @@ function TextEditor({ id, onDone }: { id: string; onDone: () => void }) {
   const lh = typeof st.lineHeight === 'number' ? `${st.lineHeight}px` : '1.21';
   const autoW = node.autoResize === 'width';
 
-  const write = (text: string) => {
-    if (inner) ed.setOverride(instanceId!, innerId!, { text });
-    else ed.model.transact('Editar texto', [{ op: 'set', id, key: 'text', value: text }], { merge: merge.current });
+  /** O nó como está agora no documento (o da renderização pode ter ficado para trás). */
+  const current = () => (inner ? findResolved(ed, instanceId!, id) : ed.model.index.get(id)) as TextNode | null;
+
+  const save = (text: string, runs: TextRun[] | undefined) => {
+    if (inner) ed.setOverride(instanceId!, innerId!, { text, runs });
+    else ed.model.transact('Editar texto', [{ op: 'set', id, key: 'text', value: text }, { op: 'set', id, key: 'runs', value: runs }], { merge: merge.current });
   };
+
+  // os trechos acompanham o que é digitado ou apagado
+  const write = (text: string) => {
+    const cur = current();
+    if (!cur?.runs?.length) {
+      if (inner) ed.setOverride(instanceId!, innerId!, { text });
+      else ed.model.transact('Editar texto', [{ op: 'set', id, key: 'text', value: text }], { merge: merge.current });
+      return;
+    }
+    const runs = runsAfterEdit(cur.runs, cur.text, text);
+    save(text, runs.length ? runs : undefined);
+  };
+
+  /** Aplica um estilo à seleção do campo (sem seleção, ao texto inteiro). */
+  const styleSelection = (make: (segs: ReturnType<typeof segmentsIn>, cur: TextNode) => Partial<RunAttrs>) => {
+    const el = ref.current;
+    const cur = current();
+    if (!el || !cur) return;
+    let s = el.selectionStart, e = el.selectionEnd;
+    if (s === e) {
+      s = 0;
+      e = cur.text.length;
+    }
+    const patch = make(segmentsIn(cur.text, cur.style, cur.runs, s, e), cur);
+    const runs = applyRunStyle(cur.runs, cur.text.length, s, e, patch, cur.style);
+    save(cur.text, runs.length ? runs : undefined);
+  };
+  const toggleBold = () =>
+    styleSelection((segs, cur) => {
+      const all = segs.every((g) => g.style.weight >= 600);
+      const baseBold = cur.style.weight >= 600;
+      return { weight: all ? (baseBold ? 400 : cur.style.weight) : baseBold ? cur.style.weight : 700 };
+    });
+  const toggleItalic = () => styleSelection((segs) => ({ italic: !segs.every((g) => g.style.italic) }));
+  const toggleDecoration = (d: 'underline' | 'strikethrough') => styleSelection((segs) => ({ decoration: segs.every((g) => g.style.decoration === d) ? 'none' : d }));
+  const setColor = (hex: string) => styleSelection(() => ({ color: hex }));
+  const clearStyles = () => styleSelection(() => ({ family: undefined, weight: undefined, italic: undefined, size: undefined, letterSpacing: undefined, decoration: undefined, color: undefined }));
 
   const finish = () => {
     const el = ref.current;
@@ -194,8 +244,30 @@ function TextEditor({ id, onDone }: { id: string; onDone: () => void }) {
     onDone();
   };
 
+  const fillHex = fill && fill.type === 'solid' ? fill.color.slice(0, 7) : '#000000';
   return (
-    <textarea
+    // o grupo só serve para saber quando o foco sai do campo e da barra ao mesmo tempo
+    <div style={{ display: 'contents' }} onBlur={(e) => !e.currentTarget.contains(e.relatedTarget as Node) && finish()}>
+      {!inner && (
+        <div
+          className="text-format-bar"
+          data-no-canvas
+          style={{ left: origin.x, top: Math.max(4, origin.y - 36) }}
+          onPointerDown={(e) => e.stopPropagation()}
+          // os botões não tiram o foco do campo (a seleção continua visível)
+          onMouseDown={(e) => (e.target as HTMLElement).tagName !== 'INPUT' && e.preventDefault()}
+        >
+          <button title="Negrito (Ctrl+B)" onClick={toggleBold}><Bold size={13} /></button>
+          <button title="Itálico (Ctrl+I)" onClick={toggleItalic}><Italic size={13} /></button>
+          <button title="Sublinhado (Ctrl+U)" onClick={() => toggleDecoration('underline')}><Underline size={13} /></button>
+          <button title="Tachado (Ctrl+Shift+X)" onClick={() => toggleDecoration('strikethrough')}><Strikethrough size={13} /></button>
+          <label className="text-format-color" title="Cor do trecho">
+            <input type="color" defaultValue={fillHex} onChange={(e) => setColor(e.target.value)} />
+          </label>
+          <button title="Tirar os estilos do trecho" onClick={clearStyles}><Eraser size={13} /></button>
+        </div>
+      )}
+      <textarea
       ref={ref}
       className={`text-editor ${autoW ? '' : 'wrap'}`}
       data-no-canvas
@@ -210,22 +282,33 @@ function TextEditor({ id, onDone }: { id: string; onDone: () => void }) {
         font: `${st.italic ? 'italic ' : ''}${st.weight} ${st.size}px/${lh} "${st.family}", Inter, sans-serif`,
         letterSpacing: `${st.letterSpacing ?? 0}px`,
         textAlign: st.align === 'justify' ? 'justify' : st.align ?? 'left',
-        color: `rgba(${color.r},${color.g},${color.b},${color.a})`,
+        color: rich ? 'transparent' : `rgba(${color.r},${color.g},${color.b},${color.a})`,
         textTransform: st.case === 'upper' ? 'uppercase' : st.case === 'lower' ? 'lowercase' : st.case === 'title' ? 'capitalize' : 'none',
-        textDecoration: st.decoration === 'underline' ? 'underline' : st.decoration === 'strikethrough' ? 'line-through' : 'none',
+        textDecoration: rich ? 'none' : st.decoration === 'underline' ? 'underline' : st.decoration === 'strikethrough' ? 'line-through' : 'none',
         outlineWidth: 1 / z,
       }}
       onInput={(e) => write((e.target as HTMLTextAreaElement).value)}
-      onBlur={finish}
       onKeyDown={(e) => {
         e.stopPropagation();
         if (e.key === 'Escape' || (e.key === 'Enter' && (e.ctrlKey || e.metaKey))) {
           e.preventDefault();
           (e.target as HTMLTextAreaElement).blur();
+          return;
         }
+        // atalhos de estilo valem para a seleção (dentro de instâncias o texto só troca de conteúdo)
+        const mod = (e.ctrlKey || e.metaKey) && !e.altKey;
+        const k = e.key.toLowerCase();
+        if (!mod || inner) return;
+        if (k === 'b' && !e.shiftKey) toggleBold();
+        else if (k === 'i' && !e.shiftKey) toggleItalic();
+        else if (k === 'u' && !e.shiftKey) toggleDecoration('underline');
+        else if (k === 'x' && e.shiftKey) toggleDecoration('strikethrough');
+        else return;
+        e.preventDefault();
       }}
       onPointerDown={(e) => e.stopPropagation()}
     />
+    </div>
   );
 }
 

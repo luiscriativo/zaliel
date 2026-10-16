@@ -10,11 +10,14 @@ import {
   propertyValues,
   propertyDefs,
   walk,
+  runsToSpans,
+  type TextRun,
   type Mat,
   type SceneNode,
   type ContainerNode,
   type Paint,
   type Stroke,
+  strokeSides,
   type Effect,
   type InstanceNode,
   type TextNode,
@@ -47,7 +50,13 @@ function paintsOut(ed: Editor, list: Paint[] | undefined): unknown {
 function strokesOut(ed: Editor, list: Stroke[] | undefined): unknown {
   const vis = (list ?? []).filter((s) => s.visible !== false);
   if (!vis.length) return undefined;
-  const one = (s: Stroke) => ({ color: paintOut(ed, s.paint), width: s.width, align: s.align, ...(s.dash?.length ? { dash: s.dash } : {}), ...(s.cap ? { cap: s.cap } : {}), ...(s.join ? { join: s.join } : {}) });
+  // lados: só os que têm contorno, no mesmo formato aceito na criação ({bottom: 1})
+  const sides = (s: Stroke) => {
+    const d = strokeSides(s);
+    if (!d) return {};
+    return { sides: Object.fromEntries((['top', 'right', 'bottom', 'left'] as const).filter((k) => d[k] > 0).map((k) => [k, d[k]])) };
+  };
+  const one = (s: Stroke) => ({ color: paintOut(ed, s.paint), width: s.width, align: s.align, ...sides(s), ...(s.dash?.length ? { dash: s.dash } : {}), ...(s.cap ? { cap: s.cap } : {}), ...(s.join ? { join: s.join } : {}) });
   return vis.length === 1 ? one(vis[0]) : vis.map(one);
 }
 
@@ -91,6 +100,11 @@ function overridePath(ed: Editor, main: ContainerNode, key: string): string {
   return names.join(' > ');
 }
 
+/** Trechos de estilo no mesmo formato de `spans` da escrita. */
+function spansOut(text: string, runs: TextRun[]): Record<string, unknown>[] {
+  return runsToSpans(text, runs).map(({ family, ...s }) => (family !== undefined ? { ...s, font: family } : s));
+}
+
 /** Uma camada no formato de leitura/escrita da automação. */
 export function nodeOut(ed: Editor, n: SceneNode, depth: number): Record<string, unknown> {
   const o: Record<string, unknown> = { id: n.id, type: n.type === 'boolean' ? `boolean:${n.booleanOp}` : n.type, name: n.name, x: r1(n.x), y: r1(n.y), width: r1(n.width), height: r1(n.height) };
@@ -107,6 +121,7 @@ export function nodeOut(ed: Editor, n: SceneNode, depth: number): Record<string,
     const st = n.style;
     Object.assign(o, { font: st.family, size: st.size, weight: st.weight, ...(st.italic ? { italic: true } : {}), lineHeight: st.lineHeight ?? 'auto', ...(st.letterSpacing ? { letterSpacing: st.letterSpacing } : {}), align: st.align ?? 'left', ...(st.verticalAlign && st.verticalAlign !== 'top' ? { verticalAlign: st.verticalAlign } : {}), ...(st.decoration && st.decoration !== 'none' ? { decoration: st.decoration } : {}), ...(st.case && st.case !== 'none' ? { case: st.case } : {}), autoResize: n.autoResize === 'none' ? 'fixed' : n.autoResize });
     o.color = paintsOut(ed, n.fills);
+    if (n.runs?.length) o.spans = spansOut(n.text, n.runs);
     if (n.textPath) o.textPath = n.textPath;
   } else {
     const f = paintsOut(ed, n.fills);
@@ -174,6 +189,7 @@ function instanceOut(ed: Editor, n: InstanceNode, o: Record<string, unknown>): v
     for (const [key, v] of Object.entries(n.overrides)) {
       const entry: Record<string, unknown> = {};
       if (v.text !== undefined) entry.text = v.text;
+      if (v.text !== undefined && v.runs?.length) entry.spans = spansOut(v.text, v.runs);
       if (v.fills) entry.fill = paintsOut(ed, v.fills);
       if (v.strokes) entry.stroke = strokesOut(ed, v.strokes);
       if (v.visible !== undefined) entry.visible = v.visible;
@@ -280,7 +296,17 @@ export function inspect(ed: Editor, rootId: string): { problems: { id: string; n
   };
   const parentM = ed.model.index.parentMatrix(rootId);
   visit(root, parentM, null, ed.page.background ?? null, true);
-  return { problems: problems.slice(0, 80), summary };
+  // o mesmo problema dentro de várias instâncias de um componente vira uma linha só (corrige-se no componente)
+  const grouped = new Map<string, { id: string; name: string; issue: string; count: number }>();
+  for (const p of problems) {
+    const inner = p.id.includes('/') ? p.id.slice(p.id.lastIndexOf('/') + 1) : null;
+    const key = inner ? `${inner}|${p.issue}` : `${p.id}|${p.issue}|${grouped.size}`;
+    const g = grouped.get(key);
+    if (g) g.count++;
+    else grouped.set(key, { ...p, count: 1 });
+  }
+  const list = [...grouped.values()].map(({ count, ...p }) => (count > 1 ? { ...p, issue: `${p.issue} — o mesmo em ${count} instâncias (corrija no componente)` } : p));
+  return { problems: list.slice(0, 80), summary };
 }
 
 // ── Inventário (cores, tipografia, medidas) ──────────────────────────────────

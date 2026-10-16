@@ -1,7 +1,9 @@
 // Geometria das formas (usada pelo renderizador e pela exportação) e exportação SVG.
-import type { Paint, SceneNode, ShapeNode, Stroke, ZalDocument, Effect } from './types';
+import type { Paint, SceneNode, ShapeNode, Stroke, TextStyle, ZalDocument, Effect } from './types';
+import { textSegments, type TextSegment } from './text';
 import { parseHex } from './util';
 import { resolvePaint } from './variables';
+import { acceptsStrokeSides, sideStrokeGeometry, strokeSides } from './strokes';
 
 /** Caminho SVG de polígono/estrela inscrito na caixa w×h. */
 export function polygonPath(n: Pick<ShapeNode, 'type' | 'points' | 'innerRadius'>, w: number, h: number): string {
@@ -98,6 +100,21 @@ function strokeAttrs(ctx: SvgCtx, n: SceneNode, s: Stroke): string {
   return `fill="none" ${paintAttr(ctx, s.paint, n, 'stroke')} stroke-width="${s.width}"${dash}${s.cap ? ` stroke-linecap="${s.cap}"` : ''}${s.join ? ` stroke-linejoin="${s.join}"` : ''}`;
 }
 
+function strokeElement(ctx: SvgCtx, n: SceneNode, s: Stroke): string {
+  const sides = acceptsStrokeSides(n) ? strokeSides(s) : null;
+  if (!sides) return s.width > 0 ? shapeElement(n, strokeAttrs(ctx, n, s)) : '';
+  const g = sideStrokeGeometry(n.width, n.height, radii(n), sides, s.align);
+  // liso: a faixa de cada lado vira uma forma preenchida (fica exato em qualquer alinhamento)
+  if (!s.dash?.length) return `<path d="${g.ring}" fill-rule="evenodd" ${paintAttr(ctx, s.paint, n, 'fill')}/>`;
+  // tracejado: a linha central, recortada lado a lado com a espessura de cada um
+  const paint = paintAttr(ctx, s.paint, n, 'stroke');
+  return g.wedges.map((w) => {
+    const id = `z${ctx.n++}`;
+    ctx.defs.push(`<clipPath id="${id}"><path d="${w.clip}"/></clipPath>`);
+    return `<path d="${g.center}" fill="none" ${paint} stroke-width="${w.width}" stroke-dasharray="${s.dash!.join(' ')}"${s.cap ? ` stroke-linecap="${s.cap}"` : ''} clip-path="url(#${id})"/>`;
+  }).join('');
+}
+
 function filterFor(ctx: SvgCtx, effects: Effect[] | undefined): string {
   const fx = (effects ?? []).filter((e) => e.visible !== false && (e.type === 'drop-shadow' || e.type === 'layer-blur'));
   if (!fx.length) return '';
@@ -111,6 +128,27 @@ function filterFor(ctx: SvgCtx, effects: Effect[] | undefined): string {
   });
   ctx.defs.push(`<filter id="${id}" x="-50%" y="-50%" width="200%" height="200%">${parts.join('')}</filter>`);
   return ` filter="url(#${id})"`;
+}
+
+function decorationAttr(d: TextStyle['decoration']): string {
+  return d === 'underline' ? ' text-decoration="underline"' : d === 'strikethrough' ? ' text-decoration="line-through"' : '';
+}
+
+/** Atributos de um trecho de texto que mudam em relação ao estilo do texto. */
+function segmentAttrs(g: TextSegment, base: TextStyle): string {
+  const s = g.style;
+  let a = '';
+  if (s.family !== base.family) a += ` font-family="${esc(s.family)}"`;
+  if (s.size !== base.size) a += ` font-size="${s.size}"`;
+  if (s.weight !== base.weight) a += ` font-weight="${s.weight}"`;
+  if (!!s.italic !== !!base.italic) a += ` font-style="${s.italic ? 'italic' : 'normal'}"`;
+  if ((s.letterSpacing ?? 0) !== (base.letterSpacing ?? 0)) a += ` letter-spacing="${s.letterSpacing ?? 0}"`;
+  if ((s.decoration ?? 'none') !== (base.decoration ?? 'none')) a += decorationAttr(s.decoration) || ' text-decoration="none"';
+  if (g.color) {
+    const c = color(g.color);
+    a += ` fill="${c.fill}"${c.opacity < 1 ? ` fill-opacity="${+c.opacity.toFixed(3)}"` : ''}`;
+  }
+  return a;
 }
 
 function nodeToSvg(ctx: SvgCtx, n: SceneNode, resolve: (n: SceneNode) => SceneNode): string {
@@ -129,7 +167,23 @@ function nodeToSvg(ctx: SvgCtx, n: SceneNode, resolve: (n: SceneNode) => SceneNo
     const lh = typeof st.lineHeight === 'number' ? st.lineHeight : st.size * 1.25;
     const anchor = st.align === 'center' ? 'middle' : st.align === 'right' ? 'end' : 'start';
     const ax = st.align === 'center' ? n.width / 2 : st.align === 'right' ? n.width : 0;
-    let lines = n.text.split('\n').map((l, i) => `<tspan x="${ax}" y="${(i + 0.8) * lh}">${esc(l)}</tspan>`).join('');
+    // cada linha é um <tspan>; os trechos com estilo próprio viram <tspan> dentro dela
+    const segs = textSegments(n.text, st, n.runs);
+    const piece = (from: number, to: number) =>
+      segs
+        .filter((g) => g.end > from && g.start < to)
+        .map((g) => {
+          const t = esc(n.text.slice(Math.max(from, g.start), Math.min(to, g.end)));
+          const a = g.styled ? segmentAttrs(g, st) : '';
+          return a ? `<tspan${a}>${t}</tspan>` : t;
+        })
+        .join('');
+    let at = 0;
+    let lines = n.text.split('\n').map((l, i) => {
+      const from = at;
+      at += l.length + 1;
+      return `<tspan x="${ax}" y="${(i + 0.8) * lh}">${piece(from, from + l.length)}</tspan>`;
+    }).join('');
     let pathAnchor = anchor;
     if (n.textPath) {
       // texto em caminho: <textPath> apontando para a curva nas definições
@@ -137,10 +191,10 @@ function nodeToSvg(ctx: SvgCtx, n: SceneNode, resolve: (n: SceneNode) => SceneNo
       ctx.defs.push(`<path id="${id}" d="${esc(n.textPath.d)}"/>`);
       const start = n.textPath.start ?? 0;
       const offset = st.align === 'center' ? 50 + start : st.align === 'right' ? 100 : start;
-      lines = `<textPath href="#${id}" startOffset="${offset}%"${n.textPath.flip ? ' side="right"' : ''}>${esc(n.text.replace(/\n/g, ' '))}</textPath>`;
+      lines = `<textPath href="#${id}" startOffset="${offset}%"${n.textPath.flip ? ' side="right"' : ''}>${piece(0, n.text.length).replace(/\n/g, ' ')}</textPath>`;
       pathAnchor = anchor;
     }
-    body = `<text font-family="${esc(st.family)}" font-size="${st.size}" font-weight="${st.weight}"${st.italic ? ' font-style="italic"' : ''}${st.letterSpacing ? ` letter-spacing="${st.letterSpacing}"` : ''} text-anchor="${pathAnchor}" ${fill}>${lines}</text>`;
+    body = `<text font-family="${esc(st.family)}" font-size="${st.size}" font-weight="${st.weight}"${st.italic ? ' font-style="italic"' : ''}${st.letterSpacing ? ` letter-spacing="${st.letterSpacing}"` : ''}${decorationAttr(st.decoration)} text-anchor="${pathAnchor}" ${fill}>${lines}</text>`;
   } else {
     for (const f of fills) body += shapeElement(n, paintAttr(ctx, f, n, 'fill'));
     if ('children' in n && n.children.length) {
@@ -152,7 +206,7 @@ function nodeToSvg(ctx: SvgCtx, n: SceneNode, resolve: (n: SceneNode) => SceneNo
       }
       body += inner;
     }
-    for (const s of strokes) body += shapeElement(n, strokeAttrs(ctx, n, s));
+    for (const s of strokes) body += strokeElement(ctx, n, s);
   }
   return `<g id="${esc(n.name)}" transform="${tf}"${op}${filter}>${body}</g>`;
 }

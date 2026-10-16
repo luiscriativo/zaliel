@@ -9,6 +9,7 @@ import {
   parse,
   FileFormatError,
   resolveInstance,
+  naturalInstanceSize,
   componentFinder,
   buildLibrary,
   detachInstance,
@@ -192,6 +193,8 @@ export class Editor {
   tool: Tool = 'move';
   viewport: Viewport = { zoom: 1, x: 0, y: 0 };
   editingText: string | null = null;
+  /** O texto em edição continua desenhado no canvas (tem trechos de estilo que o campo de texto não mostra). */
+  editingTextShown = false;
   /** Grupo/instância "aberto" com duplo clique (seleção acontece dentro dele). */
   scope: string | null = null;
   toasts: Toast[] = [];
@@ -290,6 +293,8 @@ export class Editor {
       this.syncWindow();
       this.scheduleAutoSave();
     });
+    // instâncias que abraçam o conteúdo se medem pelo componente (texto e propriedades delas)
+    this.model.measureInstance = (n) => naturalInstanceSize(n, this.finder, this.host?.measureText);
     if (this.host) this.model.measureText = this.host.measureText;
   }
 

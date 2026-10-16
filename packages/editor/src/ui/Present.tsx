@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { ArrowLeft, RotateCcw, X } from 'lucide-react';
 import { hotspots, screens, startScreen, overlayRect, OVERLAY_BACKGROUND, type SceneNode, type Hotspot } from '@zaliel/core';
-import { useEditor } from './hooks';
+import { useEditor, isMac } from './hooks';
 import type { Editor } from '../editor';
 
 const images = new Map<string, string>();
@@ -125,7 +125,7 @@ export function Presentation() {
 
   return (
     <div className="present" role="dialog" aria-label="Apresentação do protótipo">
-      <header className="present-bar">
+      <header className={`present-bar ${isMac ? 'mac' : ''}`}>
         <span className="present-title">{screen.name}</span>
         <span className="muted">{page.name}</span>
         <span className="grow" />

@@ -6,6 +6,7 @@ import {
   serialize,
   parse,
   resolveInstance,
+  naturalInstanceSize,
   componentFinder,
   buildLibrary,
   publishedComponents,
@@ -443,5 +444,90 @@ describe('overrides de layout em instâncias', () => {
     expect(t.width).toBe(200); // preenche a largura em vez de ficar com 31 px
     expect(t.opacity).toBe(0.5);
     expect(t.strokes?.[0].width).toBe(2);
+  });
+});
+
+describe('troca de instância aninhada e instâncias que abraçam o conteúdo', () => {
+  it('a troca de componente mantém os overrides nas camadas de mesmo nome', () => {
+    const { doc, page } = setup();
+    const vetorA = createNode('rect', { x: 0, y: 0, width: 16, height: 16 }, { name: 'Vetor' });
+    const vetorB = createNode('rect', { x: 0, y: 0, width: 16, height: 16 }, { name: 'Vetor' });
+    const a = createNode('component', { x: 0, y: 0, width: 16, height: 16 }, { name: 'Ícone A', children: [vetorA] });
+    const b = createNode('component', { x: 0, y: 0, width: 16, height: 16 }, { name: 'Ícone B', children: [vetorB] });
+    const icone = createNode('instance', { x: 0, y: 0, width: 16, height: 16 }, {
+      name: 'Ícone',
+      componentId: a.id,
+      propRefs: { component: 'p-icone' },
+      overrides: { [vetorA.id]: { fills: [{ type: 'solid', color: '#ffffff' }] } },
+    });
+    const botao = createNode('component', { x: 0, y: 0, width: 100, height: 36 }, {
+      name: 'Botão',
+      properties: [{ id: 'p-icone', name: 'Ícone', type: 'swap', default: a.id }],
+      children: [icone],
+    });
+    page.children.push(a, b, botao);
+    const find = componentFinder(doc, () => [a, b, botao]);
+    const inst = createNode('instance', { x: 0, y: 100, width: 100, height: 36 }, { componentId: botao.id, props: { 'p-icone': b.id } });
+    const r = resolveInstance(inst, find)!;
+    const vetor = (r.children[0] as { children: { name: string; fills?: { color?: string }[] }[] }).children[0];
+    expect(vetor.name).toBe('Vetor');
+    expect(vetor.fills?.[0].color).toBe('#ffffff');
+  });
+
+  it('a instância abraça o texto dela, como o componente', () => {
+    const { doc, model, page } = setup();
+    const measure = (n: TextNode) => ({ width: n.text.length * 10, height: 20 });
+    const label = createNode('text', { x: 0, y: 0, width: 230, height: 20 }, { text: 'Novo Status de Material', autoResize: 'width', propRefs: { text: 'p-rotulo' } });
+    const comp = createNode('component', { x: 0, y: 0, width: 254, height: 36 }, {
+      layout: { direction: 'horizontal', gap: 0, padding: [0, 12, 0, 12], justify: 'start', align: 'center' },
+      sizing: { horizontal: 'hug', vertical: 'fixed' },
+      properties: [{ id: 'p-rotulo', name: 'Rótulo', type: 'text', default: 'Novo Status de Material' }],
+      children: [label],
+    });
+    model.transact('Componente', [{ op: 'insert', parent: page.id, index: 0, node: comp }]);
+    const find = componentFinder(doc, () => model.index.components());
+    model.measureText = measure;
+    model.measureInstance = (n) => naturalInstanceSize(n, find, measure);
+    const inst = createNode('instance', { x: 0, y: 100, width: 254, height: 36 }, { componentId: comp.id, props: { 'p-rotulo': 'Exportar' } });
+    model.transact('Inserir', [{ op: 'insert', parent: page.id, index: 1, node: inst }]);
+    expect(model.index.get(inst.id)!.width).toBe(104); // 8 letras × 10 + 24 de margem
+    expect(model.index.get(inst.id)!.height).toBe(36); // altura fixa no componente
+  });
+});
+
+describe('auto layout: filho que preenche e muda de altura', () => {
+  it('o pai que abraça a altura acompanha um filho com wrap que preenche a largura', () => {
+    const { model, page } = setup();
+    const kids = Array.from({ length: 6 }, () => createNode('frame', { x: 0, y: 0, width: 100, height: 30 }));
+    const grid = createNode('frame', { x: 0, y: 0, width: 50, height: 10 }, {
+      layout: { direction: 'horizontal', gap: 10, padding: [0, 0, 0, 0], justify: 'start', align: 'start', wrap: true },
+      sizing: { horizontal: 'fill', vertical: 'hug' },
+      children: kids,
+    });
+    const section = createNode('frame', { x: 0, y: 0, width: 1000, height: 10 }, {
+      layout: { direction: 'vertical', gap: 0, padding: [10, 10, 10, 10], justify: 'start', align: 'start' },
+      sizing: { horizontal: 'fixed', vertical: 'hug' },
+      children: [grid],
+    });
+    model.transact('Inserir', [{ op: 'insert', parent: page.id, index: 0, node: section }]);
+    expect(model.index.get(grid.id)!.height).toBe(30); // 6 × 100 + gaps cabe numa linha de 980
+    expect(model.index.get(section.id)!.height).toBe(50);
+  });
+});
+
+describe('propriedade booleana de componente', () => {
+  it('mostra na instância uma camada que está oculta no componente', () => {
+    const { doc, page } = setup();
+    const detalhe = createNode('text', { x: 0, y: 0, width: 80, height: 14 }, { text: 'detalhe', visible: false, propRefs: { visible: 'p-mostrar' } });
+    const comp = createNode('component', { x: 0, y: 0, width: 100, height: 20 }, {
+      properties: [{ id: 'p-mostrar', name: 'Mostrar detalhe', type: 'boolean', default: false }],
+      children: [detalhe],
+    });
+    page.children.push(comp);
+    const find = componentFinder(doc, () => [comp]);
+    const ligado = createNode('instance', { x: 0, y: 40, width: 100, height: 20 }, { componentId: comp.id, props: { 'p-mostrar': true } });
+    const padrao = createNode('instance', { x: 0, y: 80, width: 100, height: 20 }, { componentId: comp.id });
+    expect(resolveInstance(ligado, find)!.children[0].visible).toBe(true);
+    expect(resolveInstance(padrao, find)!.children[0].visible).toBe(false);
   });
 });

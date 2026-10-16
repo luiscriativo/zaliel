@@ -15,8 +15,10 @@ const OVERVIEW = `# Zaliel — how the document works
 - Sizing inside auto layout: width/height can be a number (fixed), "fill" (fill the parent's available space) or "hug" (shrink to content). Frames with layout default to "hug".
   Typical: screen root frame fixed 390x844 (mobile) or 1440x900 (desktop) with vertical layout; sections width "fill"; buttons "hug"; text in cards width "fill" so it wraps.
 - Text: {type:"text", text, font, size, weight (400/500/600/700 or names), lineHeight (px or multiplier like 1.4), letterSpacing, align, color}. A text with numeric or "fill" width wraps (autoResize "height"); without width it grows horizontally.
+- Mixed styles in one text (a bold or colored part inside a sentence): use spans instead of text — {type:"text", spans:["Delete ", {text:"2 selected records", weight:700}, "? This cannot be undone."], width:"fill"}. Each span may set weight/bold, italic, color, size, font, letterSpacing, decoration; the rest comes from the text itself. read_nodes returns spans in the same format; update with spans replaces the whole text. Also works in instance overrides: overrides:{"Message": {spans:[...]}}.
 - Paints: "#hex", "rgba(...)", "$variable/name" (binds to a color variable), {type:"linear", angle, stops:["#a","#b"]}, "linear-gradient(135deg, #a, #b)", or {type:"image", src}.
-- Strokes: "#ddd" (1px inside), "1px solid #ddd", or {color, width, align: inside|center|outside, dash: [4,4]}.
+- Strokes: "#ddd" (1px inside), "1px solid #ddd", or {color, width, align: inside|center|outside, dash: [4,4], sides: {bottom: 1}}.
+  One side only (like CSS border-bottom): "strokeBottom": "1px solid #e5e7eb" (also strokeTop, strokeRight, strokeLeft; "none" removes that side). Use this for table rows/cells instead of 1px rectangles.
 - Effects: "shadow": "xs"|"sm"|"md"|"lg"|"xl" presets, or effects: [{type:"shadow", color, x, y, blur, spread}, {type:"background-blur", radius}].
 - radius: number or [topLeft, topRight, bottomRight, bottomLeft].
 - "ref": give any created layer a ref ("card1") and use it later in the same batch_design call (parent: "card1", ids: ["card1"]). Refs are returned with their real ids.

@@ -67,10 +67,21 @@ export type Paint =
       blendMode?: BlendMode;
     };
 
+/** Espessura de cada lado de um contorno (0 = lado sem contorno). */
+export interface StrokeSides {
+  top: number;
+  right: number;
+  bottom: number;
+  left: number;
+}
+
 export interface Stroke {
   paint: Paint;
+  /** Espessura uniforme (e a referência quando `sides` existe). */
   width: number;
   align: 'inside' | 'center' | 'outside';
+  /** Espessura por lado, como border-top/right/bottom/left do CSS. Só vale em caixas (frame, retângulo, componente, instância). */
+  sides?: StrokeSides;
   dash?: number[];
   cap?: 'butt' | 'round' | 'square';
   join?: 'miter' | 'round' | 'bevel';
@@ -283,8 +294,27 @@ export interface TextNode extends BaseNode {
   text: string;
   style: TextStyle;
   autoResize: 'width' | 'height' | 'none';
+  /** Trechos com estilo próprio (negrito, cor…) por cima do estilo do texto. */
+  runs?: TextRun[];
   /** Texto que segue um caminho (em vez de linhas). */
   textPath?: TextPath;
+}
+
+/**
+ * Trecho de um texto com estilo diferente do resto. `start`/`end` são posições no texto
+ * (unidades UTF-16, como em JavaScript; `end` não entra). Só os campos que mudam ficam gravados.
+ */
+export interface TextRun {
+  start: number;
+  end: number;
+  family?: string;
+  weight?: number;
+  italic?: boolean;
+  size?: number;
+  letterSpacing?: number;
+  decoration?: TextStyle['decoration'];
+  /** Cor do trecho (no lugar do preenchimento do texto). */
+  color?: Hex;
 }
 
 export interface TextPath {
@@ -298,6 +328,8 @@ export interface TextPath {
 
 export interface InstanceOverride {
   text?: string;
+  /** Trechos de estilo do texto trocado (só valem junto com `text`). */
+  runs?: TextRun[];
   fills?: Paint[];
   strokes?: Stroke[];
   visible?: boolean;

@@ -134,7 +134,7 @@ export class CanvasHost {
   draw(): void {
     const e = this.editor;
     if (!this.canvas || this.contextLost || e.home) return;
-    const hidden = e.editingText ? new Set([e.editingText]) : undefined;
+    const hidden = e.editingText && !e.editingTextShown ? new Set([e.editingText]) : undefined;
     this.renderer.frame({
       doc: e.doc,
       page: e.page,

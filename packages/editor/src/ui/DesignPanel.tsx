@@ -6,8 +6,8 @@ import {
   MoveHorizontal, MoveVertical, ArrowUpToLine, ArrowDownToLine, FoldVertical, FlipVertical2, SquaresUnite, SquaresSubtract, SquaresIntersect, SquaresExclude, Spline, PenTool, Layers2, Ruler,
 } from 'lucide-react';
 import {
-  findVariable, allCollections, clone, detachPatch, scalePath,
-  type AutoLayout, type BlendMode, type BooleanOp, type ContainerNode, type Effect, type Paint, type SceneNode, type ShapeNode, type Stroke, type TextNode, type TextStyle, type SizingMode,
+  findVariable, allCollections, clone, detachPatch, scalePath, acceptsStrokeSides, RUN_ATTRS, clearRunAttr,
+  type StrokeSides, type AutoLayout, type BlendMode, type BooleanOp, type ContainerNode, type Effect, type Paint, type SceneNode, type ShapeNode, type Stroke, type TextNode, type TextStyle, type SizingMode,
 } from '@zaliel/core';
 import { useEditor } from './hooks';
 import { Check, IconBtn, NumberField, Section, Seg, Select, common, MIXED, type Maybe } from './controls';
@@ -484,8 +484,13 @@ function TextSection({ nodes }: { nodes: TextNode[] }) {
   // mexer à mão em fonte/tamanho solta o estilo de texto (alinhamento não faz parte do estilo)
   const setStyle = (patch: Partial<TextStyle>, merge?: string) =>
     ed.setEach(ids, (n) => {
+      const t = n as TextNode;
       const keepsStyle = Object.keys(patch).every((k) => k === 'align' || k === 'verticalAlign');
-      return { style: { ...(n as TextNode).style, ...patch }, ...(n.styles?.text && !keepsStyle ? detachPatch(n, 'text') : {}) };
+      const style = { ...t.style, ...patch };
+      // o que muda no texto inteiro deixa de ser diferente nos trechos
+      const keys = RUN_ATTRS.filter((k) => k in patch);
+      const runs = t.runs?.length && keys.length ? clearRunAttr(t.runs, t.text.length, keys, style) : null;
+      return { style, ...(runs ? { runs: runs.length ? runs : undefined } : {}), ...(n.styles?.text && !keepsStyle ? detachPatch(n, 'text') : {}) };
     }, 'Texto', merge);
   const textStyle = linkedStyle(ed, nodes, 'text');
   const fonts = ed.host?.fonts;
@@ -614,6 +619,8 @@ function PaintSection({ nodes, kind }: { nodes: SceneNode[]; kind: 'fills' | 'st
   const withPaint = (x: Paint | Stroke, p: Paint): Paint | Stroke => (kind === 'fills' ? p : { ...(x as Stroke), paint: p });
   const slot = kind === 'fills' ? 'fill' : 'stroke';
   const style = linkedStyle(ed, nodes, slot);
+  // espessura por lado só existe em caixas (frame, retângulo, componente, instância)
+  const boxes = kind === 'strokes' && nodes.every(acceptsStrokeSides);
 
   return (
     <Section
@@ -675,7 +682,7 @@ function PaintSection({ nodes, kind }: { nodes: SceneNode[]; kind: 'fills' | 'st
             </div>}
             {kind === 'strokes' && (
               <div className="grid2" style={{ marginTop: 4, marginBottom: 6 }}>
-                <NumberField lead="≡" title="Espessura" min={0} value={(x as Stroke).width} onChange={(v, o) => update((l) => l.map((y, j) => (j === i ? { ...(y as Stroke), width: v } : y)), o.merge)} />
+                <NumberField lead="≡" title="Espessura" min={0} value={(x as Stroke).width} onChange={(v, o) => update((l) => l.map((y, j) => (j === i ? withWidth(y as Stroke, v) : y)), o.merge)} />
                 <Select
                   value={(x as Stroke).align}
                   options={[{ value: 'inside', label: 'Por dentro' }, { value: 'center', label: 'Centralizado' }, { value: 'outside', label: 'Por fora' }]}
@@ -691,6 +698,27 @@ function PaintSection({ nodes, kind }: { nodes: SceneNode[]; kind: 'fills' | 'st
                   options={[{ value: 'butt', label: 'Ponta reta' }, { value: 'round', label: 'Ponta redonda' }, { value: 'square', label: 'Ponta quadrada' }]}
                   onChange={(v) => update((l) => l.map((y, j) => (j === i ? { ...(y as Stroke), cap: v === 'butt' ? undefined : (v as Stroke['cap']) } : y)))}
                 />
+                {boxes && (
+                  <Select
+                    value={sidesMode(x as Stroke)}
+                    options={SIDE_MODES}
+                    onChange={(v) => update((l) => l.map((y, j) => (j === i ? withSidesMode(y as Stroke, v as SidesMode) : y)))}
+                  />
+                )}
+              </div>
+            )}
+            {kind === 'strokes' && boxes && sidesMode(x as Stroke) === 'custom' && (
+              <div className="grid2" style={{ marginTop: -2, marginBottom: 6 }}>
+                {SIDE_FIELDS.map(([side, lead, tip]) => (
+                  <NumberField
+                    key={side}
+                    lead={lead}
+                    title={tip}
+                    min={0}
+                    value={(x as Stroke).sides?.[side] ?? (x as Stroke).width}
+                    onChange={(v, o) => update((l) => l.map((y, j) => (j === i ? withSide(y as Stroke, side, v) : y)), o.merge)}
+                  />
+                ))}
               </div>
             )}
             {open?.i === i && (
@@ -701,6 +729,53 @@ function PaintSection({ nodes, kind }: { nodes: SceneNode[]; kind: 'fills' | 'st
       })}
     </Section>
   );
+}
+
+type SidesMode = 'all' | keyof StrokeSides | 'custom';
+const SIDE_MODES: { value: SidesMode; label: string }[] = [
+  { value: 'all', label: 'Todos os lados' },
+  { value: 'top', label: 'Só em cima' },
+  { value: 'bottom', label: 'Só embaixo' },
+  { value: 'left', label: 'Só à esquerda' },
+  { value: 'right', label: 'Só à direita' },
+  { value: 'custom', label: 'Personalizado' },
+];
+const SIDE_FIELDS: [keyof StrokeSides, string, string][] = [
+  ['top', '↑', 'Espessura em cima'],
+  ['bottom', '↓', 'Espessura embaixo'],
+  ['left', '←', 'Espessura à esquerda'],
+  ['right', '→', 'Espessura à direita'],
+];
+const SIDE_NAMES = ['top', 'right', 'bottom', 'left'] as const;
+
+/** Como os lados do contorno aparecem no seletor: todos, um lado só ou personalizado. */
+function sidesMode(s: Stroke): SidesMode {
+  // "sides" gravado com os 4 lados iguais continua como personalizado (é o que o usuário escolheu editar)
+  const d = s.sides;
+  if (!d) return 'all';
+  const on = SIDE_NAMES.filter((k) => d[k] > 0);
+  return on.length === 1 && d[on[0]] === s.width ? on[0] : 'custom';
+}
+
+function withSidesMode(s: Stroke, mode: SidesMode): Stroke {
+  const { sides, ...rest } = s;
+  const w = s.width || 1;
+  if (mode === 'all') return { ...rest, width: w };
+  if (mode === 'custom') return { ...rest, width: w, sides: sides ? { ...sides } : { top: w, right: w, bottom: w, left: w } };
+  return { ...rest, width: w, sides: { top: 0, right: 0, bottom: 0, left: 0, [mode]: w } };
+}
+
+/** Espessura geral: com lados, os lados que têm contorno acompanham. */
+function withWidth(s: Stroke, v: number): Stroke {
+  if (!s.sides) return { ...s, width: v };
+  const d = s.sides;
+  return { ...s, width: v, sides: { top: d.top ? v : 0, right: d.right ? v : 0, bottom: d.bottom ? v : 0, left: d.left ? v : 0 } };
+}
+
+function withSide(s: Stroke, side: keyof StrokeSides, v: number): Stroke {
+  const d = s.sides ?? { top: s.width, right: s.width, bottom: s.width, left: s.width };
+  const sides = { ...d, [side]: v };
+  return { ...s, width: Math.max(sides.top, sides.right, sides.bottom, sides.left), sides };
 }
 
 const EFFECT_NAMES: Record<Effect['type'], string> = { 'drop-shadow': 'Sombra externa', 'inner-shadow': 'Sombra interna', 'layer-blur': 'Desfoque da camada', 'background-blur': 'Desfoque do fundo' };

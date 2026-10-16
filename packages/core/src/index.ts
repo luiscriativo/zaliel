@@ -8,6 +8,8 @@ export * from './components';
 export * from './file';
 export * from './variables';
 export * from './svg';
+export * from './text';
+export * from './strokes';
 export * from './styles';
 export * from './vector';
 export * from './grids';

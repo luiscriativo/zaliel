@@ -117,6 +117,12 @@ export function createAutomation(ed: Editor) {
     for (const src of images) {
       let mime = 'image/png';
       let data: string;
+      // SVG vira vetores editáveis (o motor gráfico não abre SVG como bitmap)
+      const utf8 = src.match(/^data:image\/svg\+xml(?:;charset=[^;,]+)?,(.*)$/i);
+      if (utf8) {
+        ctx.svgImages.set(src, decodeURIComponent(utf8[1]));
+        continue;
+      }
       const m = src.match(/^data:([^;,]+);base64,(.*)$/);
       if (m) {
         mime = m[1];
@@ -131,7 +137,11 @@ export function createAutomation(ed: Editor) {
         }
         mime = MIME[src.split('.').pop()!.toLowerCase()] ?? 'image/png';
       }
-      const size = imageSize(fromBase64(data.slice(0, 200000))) ?? (mime === 'image/svg+xml' ? { width: 512, height: 512 } : null);
+      if (mime === 'image/svg+xml') {
+        ctx.svgImages.set(src, new TextDecoder().decode(fromBase64(data)));
+        continue;
+      }
+      const size = imageSize(fromBase64(data.slice(0, 200000)));
       if (!size) throw new SpecError(`não é uma imagem que dá para abrir: ${src.slice(0, 80)}`);
       const key = hashText(data.slice(0, 20000) + data.length);
       if (!ed.doc.assets[key] && !ctx.assetOps.some((o) => o.op === 'asset' && o.key === key)) ctx.assetOps.push({ op: 'asset', key, value: { mime, data, width: size.width, height: size.height } });
@@ -379,7 +389,8 @@ export function createAutomation(ed: Editor) {
         return { id };
       }
       case 'add_property': {
-        const target = node(op.component ?? op.id);
+        // "component" é procurado só entre os componentes (instâncias e telas podem ter o mesmo nome)
+        const target = op.component !== undefined && !idx.get(String(op.component)) ? conv.findComponent(String(op.component)).main : node(op.component ?? op.id);
         const owner = ed.propertyOwner(target.id);
         if (!owner) throw new SpecError('a camada não é (nem está dentro de) um componente');
         const type = String(op.type ?? 'text') as 'text' | 'boolean' | 'swap';
@@ -775,7 +786,7 @@ export function createAutomation(ed: Editor) {
 
   // ── Lista de ferramentas ───────────────────────────────────────────────────
 
-  const NODE_HELP = 'Node description (see get_guidelines "overview"): {type, ref?, name?, x?, y?, width?: number|"fill"|"hug", height?, fill?, stroke?, radius?, shadow?/effects?, opacity?, layout?: {direction, gap, padding, align, justify, wrap}, clip?, absolute?, children?: [...], text-only: text, font, size, weight, lineHeight, letterSpacing, align, color, autoResize; icon: icon, size, color, strokeWidth; image: src (file path or data URL), fit; svg: svg (markup); instance: component, variant, props, overrides; component: properties, bind; any: link:{to, action, transition}, fillStyle, textStyle, effectStyle}.';
+  const NODE_HELP = 'Node description (see get_guidelines "overview"): {type, ref?, name?, x?, y?, width?: number|"fill"|"hug", height?, fill?, stroke?, strokeTop?/strokeRight?/strokeBottom?/strokeLeft? ("1px solid #e5e7eb", like CSS border-bottom), radius?, shadow?/effects?, opacity?, layout?: {direction, gap, padding, align, justify, wrap}, clip?, absolute?, children?: [...], text-only: text (or spans: ["plain ", {text:"bold part", weight:700, color?, italic?}] for mixed styles), font, size, weight, lineHeight, letterSpacing, align, color, autoResize; icon: icon, size, color, strokeWidth; image: src (file path or data URL), fit; svg: svg (markup); instance: component, variant, props, overrides; component: properties, bind; any: link:{to, action, transition}, fillStyle, textStyle, effectStyle}.';
 
   const tools: Tool[] = [
     {
@@ -938,7 +949,7 @@ export function createAutomation(ed: Editor) {
     {
       name: 'read_nodes',
       title: 'Read layers',
-      description: 'Read layers in the same format batch_design accepts (round-trip: read, change, update). Pass ids, or parent (lists its children), or search {name, type, text} (substring, case-insensitive) over the current page (all:true for all pages). depth controls how many levels of children come back (default 2).',
+      description: 'Read layers in the same format batch_design accepts (round-trip: read, change, update). Pass ids, or parent (lists its children), or search {name, type, text} (substring, case-insensitive) over the current page (all:true for all pages; with parent, only inside that layer). depth controls how many levels of children come back (default 2).',
       inputSchema: obj({ ids: arr({ type: 'string' }, 'Layer ids'), parent: str('Parent id (page by default)'), search: obj({ name: str('Name contains'), type: str('Layer type'), text: str('Text contains') }), all: { type: 'boolean' }, depth: numb('Children depth (0–6)'), limit: numb('Max results (default 50)') }),
       annotations: { readOnlyHint: true },
       run: async (a) => {
@@ -950,7 +961,10 @@ export function createAutomation(ed: Editor) {
         if (a.search && typeof a.search === 'object') {
           const s = a.search as Record<string, string>;
           const out: unknown[] = [];
-          const pages = a.all ? ed.doc.pages : [ed.page];
+          // com parent, a busca fica dentro daquela camada (ex.: uma tela entre várias duplicadas)
+          const scope = a.parent ? (ed.model.index.get(ctx.id(String(a.parent))!) as ContainerNode | undefined) : undefined;
+          if (a.parent && !scope) throw new SpecError('pai não encontrado');
+          const pages = scope ? [{ name: ed.page.name, children: scope.children ?? [] }] : a.all ? ed.doc.pages : [ed.page];
           for (const p of pages) walk(p.children, (n) => {
             if (out.length >= limit) return false;
             const okName = !s.name || n.name.toLowerCase().includes(s.name.toLowerCase());
@@ -1023,7 +1037,23 @@ ${NODE_HELP}`,
       name: 'styles',
       title: 'Styles',
       description: 'Reusable styles. Actions: list; create {type: text|color|effect, name, ...} or {styles: [...]} — text: font, size, weight, lineHeight, letterSpacing, italic, case; color: color (or paints); effect: shadow preset or effects; update {name, ...new values, rename?} (re-applies to every layer using it); delete {name}. Apply with textStyle / fillStyle / strokeStyle / effectStyle in nodes.',
-      inputSchema: obj({ action: str('Action', { enum: ['list', 'create', 'update', 'delete'] }), type: str('text, color or effect'), name: str('Style name'), styles: arr({ type: 'object' }, 'Several styles to create') }, ['action']),
+      inputSchema: obj({
+        action: str('Action', { enum: ['list', 'create', 'update', 'delete'] }),
+        type: str('text, color or effect'),
+        name: str('Style name'),
+        rename: str('New name (update)'),
+        styles: arr({ type: 'object' }, 'Several styles to create'),
+        font: str('Text: font family'),
+        size: numb('Text: font size'),
+        weight: { type: ['number', 'string'], description: 'Text: weight (400, 700, "bold"…)' },
+        lineHeight: { type: ['number', 'string'], description: 'Text: line height (px or multiplier)' },
+        letterSpacing: numb('Text: letter spacing (px)'),
+        case: str('Text: upper, lower, title or none'),
+        color: str('Color: "#hex", "rgba(...)" or "$variable"'),
+        paints: arr({}, 'Color: several paints'),
+        shadow: str('Effect: preset xs|sm|md|lg|xl'),
+        effects: arr({ type: 'object' }, 'Effect: [{type:"shadow"|"inner-shadow"|"blur"|"background-blur", color, x, y, blur, spread}]'),
+      }, ['action']),
       run: async (a) => styles(a),
     },
     {

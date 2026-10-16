@@ -16,6 +16,7 @@ import type {
   Stroke,
   TextNode,
   TextStyle,
+  TextRun,
   Variable,
   VariableCollection,
   VariableValue,
@@ -23,6 +24,7 @@ import type {
 import { cssHex, makeAsset, newDocument, r2, weightFromStyle, Warnings, countNodes, type ImportResult } from './common';
 import { mapPoints, parsePath, serializePath } from '../vector';
 import { clone } from '../util';
+import { spansToRuns, type TextSpan } from '../text';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 type P = Record<string, any>;
@@ -281,19 +283,60 @@ export function penToDocument(input: PenInput, name: string): ImportResult {
     }
     return null;
   };
+  const weightOf = (raw: any, ctx: Ctx): number => {
+    const wv = val(raw, ctx);
+    return typeof wv === 'number' ? wv : /^\d+$/.test(String(wv)) ? parseInt(String(wv), 10) : wv === 'bold' ? 700 : weightFromStyle(String(wv ?? ''));
+  };
+  /** Conteúdo de um texto: string, ou lista de pedaços com estilo próprio. */
+  const textContent = (raw: any, ctx: Ctx, base?: TextStyle): { text: string; runs: TextRun[] } => {
+    const c = val(raw, ctx, true);
+    if (!Array.isArray(c)) return { text: String(c ?? ''), runs: [] };
+    const spans = c.map((p: any): TextSpan => {
+      if (!p || typeof p !== 'object') return { text: String(p ?? '') };
+      const s: TextSpan = { text: String(val(p.content ?? p.text, ctx, true) ?? '') };
+      if (p.fontWeight !== undefined) s.weight = weightOf(p.fontWeight, ctx);
+      if (p.fontStyle !== undefined) s.italic = p.fontStyle === 'italic';
+      if (p.fontSize !== undefined) s.size = num(p.fontSize, ctx, base?.size ?? 14);
+      if (p.fontFamily !== undefined) {
+        const family = String(val(p.fontFamily, ctx) ?? '').split(',')[0].replace(/["']/g, '').trim();
+        if (family) {
+          s.family = family;
+          fonts.add(family);
+        }
+      }
+      if (p.letterSpacing !== undefined) s.letterSpacing = r2(num(p.letterSpacing, ctx));
+      if (p.textDecoration === 'underline' || p.underline) s.decoration = 'underline';
+      if (p.textDecoration === 'line-through' || p.strikethrough) s.decoration = 'strikethrough';
+      const solid = p.fill !== undefined ? paints(p.fill, ctx).find((f) => f.type === 'solid') : undefined;
+      if (solid && solid.type === 'solid') s.color = solid.color;
+      return s;
+    });
+    return spansToRuns(spans, base);
+  };
   const paints = (raw: any, ctx: Ctx): Paint[] => (Array.isArray(raw) ? raw : raw != null ? [raw] : []).map((p) => paintOf(p, ctx)).filter(Boolean) as Paint[];
 
   const strokesOf = (n: P, ctx: Ctx): Stroke[] | undefined => {
     const list = paints(n.stroke, ctx);
     if (!list.length) return undefined;
-    const sw = Array.isArray(n.strokeWidth) ? Math.max(...(n.strokeWidth as unknown[]).map((v) => num(v, ctx))) : num(n.strokeWidth ?? 1, ctx, 1);
-    if (Array.isArray(n.strokeWidth)) warn.add('Contornos com espessura diferente por lado usam a maior espessura');
+    // espessura por lado: lista [topo, direita, baixo, esquerda] (como no CSS) ou objeto {top, right, bottom, left}
+    const raw = n.strokeWidth;
+    let sides: Stroke['sides'];
+    if (Array.isArray(raw)) {
+      const v = (raw as unknown[]).map((x) => r2(num(x, ctx)));
+      const [t, r = t, b = t, l = r] = v;
+      sides = { top: t ?? 0, right: r ?? 0, bottom: b ?? 0, left: l ?? 0 };
+    } else if (raw && typeof raw === 'object') {
+      const o = raw as P;
+      sides = { top: r2(num(o.top ?? 0, ctx)), right: r2(num(o.right ?? 0, ctx)), bottom: r2(num(o.bottom ?? 0, ctx)), left: r2(num(o.left ?? 0, ctx)) };
+    }
+    const sw = sides ? Math.max(sides.top, sides.right, sides.bottom, sides.left) : num(raw ?? 1, ctx, 1);
     if (!sw) return undefined;
+    if (sides && sides.top === sw && sides.right === sw && sides.bottom === sw && sides.left === sw) sides = undefined;
     const align = n.strokeAlignment === 'inner' || n.strokeAlignment === 'inside' ? 'inside' : n.strokeAlignment === 'outer' || n.strokeAlignment === 'outside' ? 'outside' : 'center';
     const cap = n.strokeLinecap === 'round' ? 'round' : n.strokeLinecap === 'square' ? 'square' : undefined;
     const join = n.strokeLinejoin === 'round' ? 'round' : n.strokeLinejoin === 'bevel' ? 'bevel' : undefined;
     const dash = Array.isArray(n.strokeDashArray ?? n.strokeDasharray) ? ((n.strokeDashArray ?? n.strokeDasharray) as number[]) : undefined;
-    return list.map((paint) => ({ paint, width: r2(sw), align, ...(cap ? { cap } : {}), ...(join ? { join } : {}), ...(dash ? { dash } : {}) }) as Stroke);
+    return list.map((paint) => ({ paint, width: r2(sw), align, ...(sides ? { sides } : {}), ...(cap ? { cap } : {}), ...(join ? { join } : {}), ...(dash ? { dash } : {}) }) as Stroke);
   };
 
   const effectsOf = (raw: any, ctx: Ctx): Effect[] | undefined => {
@@ -489,7 +532,11 @@ export function penToDocument(input: PenInput, name: string): ImportResult {
         for (const [path, p] of Object.entries(patches)) {
           const k = path.split('/').map((seg) => q(ctx.prefix, seg)).join('/');
           const o: InstanceOverride = {};
-          if (p.content !== undefined) o.text = String(val(p.content, ctx, true) ?? '');
+          if (p.content !== undefined) {
+            const c = textContent(p.content, ctx);
+            o.text = c.text;
+            if (c.runs.length) o.runs = c.runs;
+          }
           if (p.enabled !== undefined) o.visible = val(p.enabled, ctx) !== false;
           if (p.fill !== undefined) o.fills = paints(p.fill, ctx);
           ov[k] = o;
@@ -501,8 +548,7 @@ export function penToDocument(input: PenInput, name: string): ImportResult {
         const size = num(n.fontSize, ctx, 14);
         const family = String(val(n.fontFamily, ctx) ?? 'Inter').split(',')[0].replace(/["']/g, '').trim() || 'Inter';
         fonts.add(family);
-        const wv = val(n.fontWeight, ctx);
-        const weight = typeof wv === 'number' ? wv : /^\d+$/.test(String(wv)) ? parseInt(String(wv), 10) : wv === 'bold' ? 700 : weightFromStyle(String(wv ?? ''));
+        const weight = weightOf(n.fontWeight, ctx);
         const style: TextStyle = { family, weight, size };
         const lh = val(n.lineHeight, ctx);
         if (typeof lh === 'number' && lh > 0) style.lineHeight = r2(lh <= 4 ? lh * size : lh);
@@ -518,7 +564,9 @@ export function penToDocument(input: PenInput, name: string): ImportResult {
         const growth = String(n.textGrowth ?? 'auto');
         const autoResize = growth === 'fixed-width' ? 'height' : growth === 'fixed-width-height' || growth === 'fixed' ? 'none' : 'width';
         const fills = paints(n.fill, ctx);
-        const t = { ...base, type: 'text', text: String(val(n.content, ctx, true) ?? ''), style, autoResize, fills: fills.length ? fills : [{ type: 'solid', color: '#000000' }] } as TextNode;
+        const content = textContent(n.content, ctx, style);
+        const t = { ...base, type: 'text', text: content.text, style, autoResize, fills: fills.length ? fills : [{ type: 'solid', color: '#000000' }] } as TextNode;
+        if (content.runs.length) t.runs = content.runs;
         if (autoResize !== 'width' && !t.width) t.width = ctx.parentW ?? 200;
         const s = sizing(false);
         if (s) t.sizing = s;

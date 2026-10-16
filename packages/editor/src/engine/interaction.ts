@@ -20,10 +20,22 @@ import {
   type Rect,
   type SceneNode,
   type TextNode,
+  type Interaction as ProtoInteraction,
 } from '@zaliel/core';
 import type { Editor, Tool } from '../editor';
 import { marqueeSelect, pickInside, pickTarget, hitPath } from './hit';
 import { VectorTool } from './vector';
+import { LINK_HIT, distanceToCurve, handlePoint, linkCurves, linkTargetAt } from './links';
+
+/** Ligação do protótipo sendo puxada no canvas (da alça de uma camada ou da ponta de uma seta). */
+export interface LinkDrag {
+  from: string;
+  /** Ligação que já existia (arrastar a ponta troca o destino; soltar no vazio remove). */
+  existing: ProtoInteraction | null;
+  target: string | null;
+  at: Point;
+  moved: boolean;
+}
 
 /** Largura das réguas, em px de tela. */
 export const RULER = 20;
@@ -56,7 +68,8 @@ type Drag =
   | { kind: 'create'; tool: Tool; start: Point }
   | { kind: 'pen-handle'; index: number }
   | { kind: 'guide'; axis: 'x' | 'y'; index: number | null; at: number }
-  | { kind: 'vector' };
+  | { kind: 'vector' }
+  | { kind: 'link' };
 
 interface MoveItem {
   id: string;
@@ -86,6 +99,9 @@ export class Interaction {
   guides: Guide[] = [];
   reorderLine: [Point, Point] | null = null;
   dropTarget: string | null = null;
+  linkDrag: LinkDrag | null = null;
+  /** Origem da ligação sob o cursor (a curva acende). */
+  linkHover: string | null = null;
   pen: PenPoint[] = [];
   space = false;
   vector: VectorTool;
@@ -278,6 +294,20 @@ export class Interaction {
       ed.exitVectorEdit();
     }
 
+    // ligações do protótipo: puxar da alça cria, puxar a ponta troca o destino, clicar na linha seleciona a origem
+    const link = e.button === 0 ? this.linkAt(p) : null;
+    if (link) {
+      if (link.kind === 'curve') {
+        ed.select([link.from]);
+        return;
+      }
+      if (!ed.selection.includes(link.from)) ed.select([link.from]);
+      this.linkDrag = { from: link.from, existing: link.existing, target: link.existing?.target ?? null, at: p, moved: false };
+      this.drag = { kind: 'link' };
+      this.el.style.cursor = 'grabbing';
+      return;
+    }
+
     if (ed.tool === 'move' && !this.handleAt(p).handle) {
       const gi = this.guideAt(p);
       if (gi !== null) {
@@ -388,6 +418,15 @@ export class Interaction {
         this.redraw();
         break;
       }
+      case 'link': {
+        const ld = this.linkDrag;
+        if (!ld || (!ld.moved && Math.hypot(p.x - this.downAt.x, p.y - this.downAt.y) < 3)) return;
+        ld.moved = true;
+        ld.at = p;
+        ld.target = linkTargetAt(ed, w, ld.from);
+        this.redraw();
+        break;
+      }
       case 'pen-handle': {
         const pt = this.pen[d.index];
         pt.out = w;
@@ -413,6 +452,7 @@ export class Interaction {
     const w = ed.screenToWorld(this.local(e));
     if (d.kind === 'guide') this.finishGuide(d, this.local(e));
     if (d.kind === 'vector') this.vector.up();
+    if (d.kind === 'link') this.finishLink();
     if (d.kind === 'create') this.finishCreate(d, w, e);
     if (d.kind === 'move' && d.moved) this.finishMove(d, w);
     if (d.kind === 'move' && !d.moved && !e.shiftKey) {
@@ -516,6 +556,16 @@ export class Interaction {
       ed.setHover(null);
       return;
     }
+    const link = this.linkAt(p);
+    if ((link?.from ?? null) !== this.linkHover) {
+      this.linkHover = link?.from ?? null;
+      this.redraw();
+    }
+    if (link) {
+      this.el.style.cursor = link.kind === 'curve' ? 'pointer' : 'grab';
+      ed.setHover(link.kind === 'curve' ? link.from : null);
+      return;
+    }
     const hz = this.handleAt(p);
     if (hz.handle) {
       const n = ed.selection.length === 1 ? ed.model.index.get(ed.selection[0]) : null;
@@ -540,6 +590,40 @@ export class Interaction {
   }
 
   // ── Mover ──────────────────────────────────────────────────────────────────
+
+  /** Ligação do protótipo sob o ponto (px de tela): ponta da seta, alça da camada selecionada ou a curva. */
+  private linkAt(p: Point): { kind: 'end' | 'handle' | 'curve'; from: string; existing: ProtoInteraction | null } | null {
+    const ed = this.editor;
+    if (ed.rightTab !== 'prototype' || ed.tool !== 'move' || this.space || ed.vectorEdit) return null;
+    const curves = linkCurves(ed);
+    // só a ligação da camada selecionada tem a ponta arrastável (várias setas podem chegar no mesmo ponto);
+    // as outras se escolhem clicando na linha, que seleciona a origem
+    for (const c of curves) if (ed.selection.includes(c.from) && Math.hypot(p.x - c.e.x, p.y - c.e.y) <= LINK_HIT) return { kind: 'end', from: c.from, existing: c.interaction };
+    if (ed.selection.length === 1 && !ed.isInner(ed.selection[0])) {
+      const id = ed.selection[0];
+      const h = handlePoint(ed, id);
+      if (h && Math.hypot(p.x - h.x, p.y - h.y) <= LINK_HIT) {
+        const it = ed.model.index.get(id)?.interactions?.find((x) => x.action === 'navigate' || x.action === 'overlay') ?? null;
+        return { kind: 'handle', from: id, existing: it };
+      }
+    }
+    for (const c of curves) if (distanceToCurve(c, p) <= 5) return { kind: 'curve', from: c.from, existing: c.interaction };
+    return null;
+  }
+
+  /** Soltou a ligação: numa tela, liga (ou troca o destino); no vazio, desfaz a que existia (como no Figma). */
+  private finishLink() {
+    const ed = this.editor;
+    const ld = this.linkDrag;
+    this.linkDrag = null;
+    if (!ld?.moved) return;
+    if (ld.target) {
+      if (ld.existing?.target === ld.target) return;
+      const base: ProtoInteraction = ld.existing ?? { trigger: 'click', action: 'navigate', transition: 'instant', duration: 300 };
+      ed.setInteraction([ld.from], { ...base, action: base.action === 'overlay' ? 'overlay' : 'navigate', target: ld.target });
+      ed.setRightTab('prototype');
+    } else if (ld.existing) ed.setInteraction([ld.from], undefined);
+  }
 
   private startMove(w: Point, alt: boolean) {
     const ed = this.editor;

@@ -153,18 +153,20 @@ export function innerId(instanceId: string, id: string): string {
  * Resolve uma instância num frame "virtual" (somente leitura) com o conteúdo do componente,
  * já com overrides, layout e constraints aplicados no tamanho da instância.
  */
-export function resolveInstance(inst: InstanceNode, find: FindComponent, measureText?: MeasureText, depth = 0): ContainerNode | null {
+export function resolveInstance(inst: InstanceNode, find: FindComponent, measureText?: MeasureText, depth = 0, natural = false): ContainerNode | null {
   const main = find(inst.componentId, inst.library);
   if (!main || depth > 12) return null;
   const tree = clone(main) as ContainerNode;
   const overrides = inst.overrides ?? {};
   const props = propertyValues(propertyDefs(main, find, inst.library), inst);
+  const swappedFrom = new Map<string, ContainerNode>();
 
   // Troca o componente de uma instância aninhada. Se ela estava no tamanho do componente
   // antigo, passa para o tamanho do novo (variantes de larguras diferentes não ficam cortadas).
   const swapTo = (n: InstanceNode, id: string, library?: string) => {
     const before = find(n.componentId, n.library);
     const after = find(id, library);
+    if (before && !swappedFrom.has(n.id)) swappedFrom.set(n.id, before);
     n.componentId = id;
     n.library = library;
     if (before && after && Math.abs(n.width - before.width) < 0.5 && Math.abs(n.height - before.height) < 0.5) {
@@ -178,14 +180,23 @@ export function resolveInstance(inst: InstanceNode, find: FindComponent, measure
     list.map((n) => {
       const refs = n.propRefs;
       if (refs) {
-        if (refs.visible && refs.visible in props && !props[refs.visible]) n.visible = false;
-        if (refs.text && refs.text in props && n.type === 'text') n.text = String(props[refs.text]);
+        // a propriedade manda nos dois sentidos: esconde, e também mostra o que está oculto no componente
+        if (refs.visible && refs.visible in props) n.visible = props[refs.visible] !== false;
+        if (refs.text && refs.text in props && n.type === 'text' && n.text !== String(props[refs.text])) {
+          // texto trocado: os trechos de estilo do componente não valem mais para ele
+          n.text = String(props[refs.text]);
+          delete n.runs;
+        }
         const swap = refs.component && props[refs.component];
         if (swap && typeof swap === 'string' && n.type === 'instance') swapTo(n, swap);
       }
       const o = overrides[n.id];
       if (o) {
-        if (o.text !== undefined && n.type === 'text') n.text = o.text;
+        if (o.text !== undefined && n.type === 'text') {
+          if (o.runs) n.runs = clone(o.runs);
+          else if (o.text !== n.text) delete n.runs;
+          n.text = o.text;
+        }
         if (o.fills) n.fills = clone(o.fills);
         if (o.visible !== undefined) n.visible = o.visible;
         if (o.componentId && n.type === 'instance') swapTo(n, o.componentId, n.library);
@@ -201,14 +212,34 @@ export function resolveInstance(inst: InstanceNode, find: FindComponent, measure
         const nested: InstanceNode = { ...n, overrides: { ...(n.overrides ?? {}) } };
         const prefix = `${n.id}/`;
         for (const [k, v] of Object.entries(overrides)) if (k.startsWith(prefix)) nested.overrides![k.slice(prefix.length)] = v;
+        // componente trocado: os overrides apontavam para o antigo; seguem para as camadas de mesmo nome
+        const from = swappedFrom.get(n.id);
+        const to = from && find(nested.componentId, nested.library);
+        if (from && to) nested.overrides = remapOverrides(nested.overrides, from, to) ?? {};
+        const size = naturalInstanceSize(nested, find, measureText, depth + 1);
+        if (size) {
+          nested.width = size.width;
+          nested.height = size.height;
+        }
         const r = resolveInstance(nested, find, measureText, depth + 1);
-        if (r) return { ...r, id: n.id, name: n.name, x: n.x, y: n.y, width: n.width, height: n.height, sizing: n.sizing, absolute: n.absolute, visible: n.visible, rotation: n.rotation, flipX: n.flipX, flipY: n.flipY };
+        if (r) return { ...r, id: n.id, name: n.name, x: n.x, y: n.y, width: nested.width, height: nested.height, sizing: n.sizing, absolute: n.absolute, visible: n.visible, rotation: n.rotation, flipX: n.flipX, flipY: n.flipY };
         return n;
       }
       if ('children' in n) n.children = resolveChildren(n.children);
       return n;
     });
   tree.children = resolveChildren(tree.children);
+
+  // Tamanho natural: os eixos que abraçam o conteúdo se medem; os outros ficam no tamanho da instância
+  if (natural) {
+    const hug = instanceHug(inst, main);
+    if (!tree.layout || (!hug.horizontal && !hug.vertical)) return null;
+    if (!hug.horizontal) tree.width = inst.width;
+    if (!hug.vertical) tree.height = inst.height;
+    tree.sizing = { horizontal: hug.horizontal ? 'hug' : 'fixed', vertical: hug.vertical ? 'hug' : 'fixed' };
+    layoutNode(tree, { measureText, changes: [] });
+    return tree;
+  }
 
   // Ajuste ao tamanho da instância
   const ctx = { measureText, changes: [] };
@@ -243,6 +274,29 @@ export function resolveInstance(inst: InstanceNode, find: FindComponent, measure
     effects: inst.effects ?? tree.effects,
     cornerRadius: inst.cornerRadius ?? tree.cornerRadius,
   };
+}
+
+/** Em que eixos a instância abraça o conteúdo: o que ela definiu, senão o que o componente define. */
+function instanceHug(inst: InstanceNode, main: ContainerNode): { horizontal: boolean; vertical: boolean } {
+  const own = inst.sizing;
+  const base = main.layout ? main.sizing : undefined;
+  return {
+    horizontal: (own?.horizontal ?? base?.horizontal) === 'hug',
+    vertical: (own?.vertical ?? base?.vertical) === 'hug',
+  };
+}
+
+/**
+ * Tamanho que uma instância teria abraçando o conteúdo (textos e propriedades dela), como no
+ * componente. null quando ela não abraça em nenhum eixo — aí vale o tamanho gravado.
+ */
+export function naturalInstanceSize(inst: InstanceNode, find: FindComponent, measureText?: MeasureText, depth = 0): { width: number; height: number } | null {
+  const main = find(inst.componentId, inst.library);
+  if (!main?.layout) return null;
+  const hug = instanceHug(inst, main);
+  if (!hug.horizontal && !hug.vertical) return null;
+  const tree = resolveInstance(inst, find, measureText, depth, true);
+  return tree ? { width: tree.width, height: tree.height } : null;
 }
 
 /** Lista os textos de um componente (para editar overrides de texto no painel). */

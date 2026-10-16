@@ -21,10 +21,17 @@ import {
   type PathNode,
   type Paint,
   type Stroke,
+  type StrokeSides,
+  normalizeSides,
   type Effect,
   type AutoLayout,
   type Sizing,
   type TextStyle,
+  type TextRun,
+  type TextSpan,
+  spansToRuns,
+  runsAfterEdit,
+  clearRunAttr,
   type ComponentProperty,
   type Interaction,
   type LayoutGrid,
@@ -57,6 +64,11 @@ export interface NodeSpec {
   fill?: unknown;
   color?: unknown;
   stroke?: unknown;
+  /** Contorno de um lado só, como border-top/right/bottom/left do CSS ("1px solid #e5e7eb", número ou objeto). */
+  strokeTop?: unknown;
+  strokeRight?: unknown;
+  strokeBottom?: unknown;
+  strokeLeft?: unknown;
   radius?: number | number[];
   effects?: unknown;
   shadow?: unknown;
@@ -71,6 +83,8 @@ export interface NodeSpec {
   textStyle?: string;
   // texto
   text?: string;
+  /** Texto com pedaços de estilo próprio (negrito, cor…); no lugar de `text`. */
+  spans?: (string | SpanSpec)[];
   font?: string;
   size?: number;
   weight?: number | string;
@@ -97,7 +111,7 @@ export interface NodeSpec {
   component?: string;
   variant?: Record<string, string>;
   props?: Record<string, string | boolean>;
-  overrides?: Record<string, { text?: string; fill?: unknown; color?: unknown; stroke?: unknown; visible?: boolean; component?: string; variant?: Record<string, string>; width?: number; height?: number; opacity?: number }>;
+  overrides?: Record<string, { text?: string; spans?: (string | SpanSpec)[]; fill?: unknown; color?: unknown; stroke?: unknown; visible?: boolean; component?: string; variant?: Record<string, string>; width?: number; height?: number; opacity?: number }>;
   description?: string;
   properties?: { name: string; type: string; default: string | boolean }[];
   bind?: { text?: string; visible?: string; component?: string };
@@ -108,6 +122,8 @@ export interface NodeSpec {
 }
 
 export class SpecError extends Error {}
+
+const SIDE_KEYS = { top: 'strokeTop', right: 'strokeRight', bottom: 'strokeBottom', left: 'strokeLeft' } as const;
 
 /** Ícone já desenhado (caixa de 24×24, desenhado com traço). */
 export interface IconShape {
@@ -123,6 +139,8 @@ export class BuildContext {
   warnings: string[] = [];
   icons = new Map<string, IconShape>();
   images = new Map<string, { key: string; width: number; height: number }>();
+  /** Imagens que são SVG: viram vetores editáveis (o motor gráfico não abre SVG como bitmap). */
+  svgImages = new Map<string, string>();
   /** Operações extras (imagens novas) que entram no mesmo passo. */
   assetOps: Op[] = [];
   /** Ligações do protótipo (o destino pode ser criado depois, no mesmo lote). */
@@ -175,6 +193,16 @@ const NAMED: Record<string, string> = {
 };
 
 /** Cor CSS (#hex, rgb(), rgba(), hsl(), nome) para #rrggbb[aa]. */
+/** Clientes que não conhecem um parâmetro mandam listas e objetos como texto JSON: aceita os dois. */
+export function jsonish(v: unknown): unknown {
+  if (typeof v !== 'string' || !/^s*[[{]/.test(v)) return v;
+  try {
+    return JSON.parse(v);
+  } catch {
+    return v;
+  }
+}
+
 export function parseColor(v: unknown): string | null {
   if (typeof v !== 'string') return null;
   const s = v.trim().toLowerCase();
@@ -211,6 +239,19 @@ export function findVariableByName(ed: Editor, name: string): { variable: Variab
     }
   }
   return null;
+}
+
+/** Pedaço de um texto com estilo próprio. */
+export interface SpanSpec {
+  text: string;
+  weight?: number | string;
+  bold?: boolean;
+  italic?: boolean;
+  color?: string;
+  size?: number;
+  font?: string;
+  letterSpacing?: number;
+  decoration?: string;
 }
 
 function weightOf(v: unknown): number {
@@ -304,11 +345,13 @@ export class Converter {
   }
 
   paints(v: unknown): Paint[] {
+    v = jsonish(v);
     if (v === null || v === undefined || v === 'none') return [];
     return (Array.isArray(v) ? v : [v]).map((p) => this.paint(p)).filter(Boolean) as Paint[];
   }
 
   strokes(v: unknown, centered: boolean): Stroke[] {
+    v = jsonish(v);
     if (v === null || v === undefined || v === 'none' || v === false) return [];
     return (Array.isArray(v) ? v : [v]).map((s) => {
       if (typeof s === 'string') {
@@ -329,6 +372,7 @@ export class Converter {
         paint,
         width: Number(o.width ?? o.weight ?? 1),
         align: (['inside', 'center', 'outside'].includes(align) ? align : 'inside') as Stroke['align'],
+        ...(o.sides !== undefined ? { sides: this.sides(o.sides, Number(o.width ?? o.weight ?? 1)) } : {}),
         ...(Array.isArray(o.dash) ? { dash: o.dash.map(Number) } : {}),
         ...(o.cap ? { cap: o.cap as Stroke['cap'] } : {}),
         ...(o.join ? { join: o.join as Stroke['join'] } : {}),
@@ -336,7 +380,72 @@ export class Converter {
     });
   }
 
+  /**
+   * Lados de um contorno: {bottom: 1} (o que faltar vale 0), ["bottom", "right"] (com a espessura do contorno),
+   * [topo, direita, baixo, esquerda] em números (como no CSS) ou "bottom".
+   */
+  sides(v: unknown, width: number): StrokeSides {
+    v = jsonish(v);
+    const names = ['top', 'right', 'bottom', 'left'] as const;
+    const out: StrokeSides = { top: 0, right: 0, bottom: 0, left: 0 };
+    const list = typeof v === 'string' ? v.split(/[\s,]+/).filter(Boolean) : v;
+    if (Array.isArray(list)) {
+      if (list.every((x) => typeof x === 'number')) {
+        const [t, r = t, b = t, l = r] = list as number[];
+        return normalizeSides({ top: t, right: r, bottom: b, left: l })!;
+      }
+      for (const x of list) {
+        const k = String(x).toLowerCase();
+        if (k === 'all') names.forEach((nm) => (out[nm] = width));
+        else if (k === 'x' || k === 'horizontal') out.left = out.right = width;
+        else if (k === 'y' || k === 'vertical') out.top = out.bottom = width;
+        else if ((names as readonly string[]).includes(k)) out[k as keyof StrokeSides] = width;
+        else throw new SpecError(`lado desconhecido: ${String(x)} (use top, right, bottom ou left)`);
+      }
+      return out;
+    }
+    if (v && typeof v === 'object') {
+      for (const k of Object.keys(v)) if (!(names as readonly string[]).includes(k)) throw new SpecError(`lado desconhecido: ${k} (use top, right, bottom ou left)`);
+      return normalizeSides(v)!;
+    }
+    throw new SpecError('"sides" deve ser um objeto como {"bottom": 1}, uma lista de lados ou [topo, direita, baixo, esquerda]');
+  }
+
+  /**
+   * Atalhos strokeTop/Right/Bottom/Left (como border-bottom do CSS) aplicados sobre uma lista de contornos:
+   * o lado informado sai dos outros contornos e entra no de mesma cor e estilo (ou num novo).
+   */
+  sideStrokes(base: Stroke[], spec: NodeSpec, centered: boolean): Stroke[] | null {
+    const given = (['top', 'right', 'bottom', 'left'] as const).filter((k) => spec[SIDE_KEYS[k]] !== undefined);
+    if (!given.length) return null;
+    const full = (s: Stroke): Stroke => (s.sides ? s : { ...s, sides: { top: s.width, right: s.width, bottom: s.width, left: s.width } });
+    let list = base.map((s) => full(clone(s)));
+    for (const side of given) {
+      const raw = jsonish(spec[SIDE_KEYS[side]]);
+      for (const s of list) s.sides![side] = 0;
+      if (raw === null || raw === 'none' || raw === false || raw === 0) continue;
+      const parsed = typeof raw === 'number' ? (list[0] ? [{ ...list[0], width: raw }] : this.strokes({ width: raw, color: '#000000' }, centered)) : this.strokes(raw, centered);
+      for (const p of parsed) {
+        if (p.width <= 0) continue;
+        const same = list.find((s) => JSON.stringify(s.paint) === JSON.stringify(p.paint) && s.align === p.align && JSON.stringify(s.dash ?? []) === JSON.stringify(p.dash ?? []));
+        if (same) same.sides![side] = p.width;
+        else list.push({ ...p, sides: { top: 0, right: 0, bottom: 0, left: 0, [side]: p.width } });
+      }
+    }
+    list = list.filter((s) => s.sides!.top || s.sides!.right || s.sides!.bottom || s.sides!.left);
+    // contorno que voltou a ser igual nos 4 lados não precisa de "sides"
+    for (const s of list) {
+      const d = s.sides!;
+      if (d.top === d.right && d.right === d.bottom && d.bottom === d.left) {
+        s.width = d.top;
+        delete s.sides;
+      } else if (!Object.values(d).includes(s.width)) s.width = Math.max(d.top, d.right, d.bottom, d.left);
+    }
+    return list;
+  }
+
   effects(v: unknown): Effect[] {
+    v = jsonish(v);
     if (v === null || v === undefined || v === 'none') return [];
     if (typeof v === 'string') {
       if (SHADOWS[v]) return clone(SHADOWS[v]);
@@ -514,8 +623,11 @@ export class Converter {
       case 'icon':
         node = this.icon(spec, geom);
         break;
-      case 'image':
-        node = this.image(spec, geom);
+      case 'image': {
+        const svg = typeof spec.src === 'string' ? this.ctx.svgImages.get(spec.src) : undefined;
+        node = svg ? this.svgNode({ ...spec, type: 'svg', svg }, geom) : this.image(spec, geom);
+        break;
+      }
         break;
       case 'svg':
         node = this.svgNode(spec, geom);
@@ -607,9 +719,43 @@ export class Converter {
     };
   }
 
+  /** Pedaços com estilo próprio ("spans") → texto inteiro e trechos de estilo. */
+  spans(list: unknown, base: TextStyle): { text: string; runs: TextRun[] } {
+    if (!Array.isArray(list)) throw new SpecError('spans deve ser uma lista de { text, weight?, bold?, italic?, color?, size?, font?, letterSpacing?, decoration? }');
+    const out: TextSpan[] = list.map((s, i) => {
+      if (typeof s === 'string') return { text: s };
+      if (!s || typeof s !== 'object' || typeof (s as SpanSpec).text !== 'string') throw new SpecError(`spans[${i}] precisa de "text"`);
+      const sp = s as SpanSpec;
+      const o: TextSpan = { text: sp.text };
+      if (sp.bold !== undefined) o.weight = sp.bold ? Math.max(700, base.weight) : 400;
+      if (sp.weight !== undefined) o.weight = weightOf(sp.weight);
+      if (sp.italic !== undefined) o.italic = !!sp.italic;
+      if (sp.size !== undefined) o.size = num(sp.size, base.size);
+      if (sp.letterSpacing !== undefined) o.letterSpacing = Number(sp.letterSpacing) || 0;
+      if (sp.font !== undefined) {
+        o.family = String(sp.font);
+        if (this.ed.host && !this.ed.host.fonts.has(o.family)) this.ctx.warn(`a fonte “${o.family}” não está instalada neste computador; o trecho aparece com Inter (veja list_fonts)`);
+      }
+      if (sp.decoration !== undefined) {
+        const d = sp.decoration === 'line-through' ? 'strikethrough' : String(sp.decoration);
+        if (!['none', 'underline', 'strikethrough'].includes(d)) throw new SpecError(`spans[${i}].decoration inválido: ${sp.decoration}`);
+        o.decoration = d as TextStyle['decoration'];
+      }
+      if (sp.color !== undefined) {
+        const p = this.paint(sp.color);
+        if (!p || p.type !== 'solid') throw new SpecError(`spans[${i}].color precisa ser uma cor sólida`);
+        if (p.variable) this.ctx.warn(`spans[${i}]: o trecho guarda a cor de ${sp.color}, sem ligação com a variável`);
+        o.color = p.color;
+      }
+      return o;
+    });
+    return spansToRuns(out, base);
+  }
+
   private text(spec: NodeSpec, geom: { x: number; y: number; width: number; height: number }): TextNode {
-    const text = String(spec.text ?? '');
     const style = this.textStyle(spec);
+    const fromSpans = spec.spans !== undefined ? this.spans(spec.spans, style) : null;
+    const text = fromSpans ? fromSpans.text : String(spec.text ?? '');
     const auto = spec.autoResize === 'fixed' ? 'none' : (spec.autoResize as TextNode['autoResize'] | undefined);
     const widthMode = this.sizeMode(spec.width);
     const autoResize = auto ?? (typeof spec.width === 'number' || widthMode === 'fill' ? (typeof spec.height === 'number' ? 'none' : 'height') : 'width');
@@ -619,6 +765,7 @@ export class Converter {
       autoResize,
       name: text.replace(/\s+/g, ' ').slice(0, 40) || 'Texto',
       fills: this.paints(spec.color ?? spec.fill ?? '#1d1c1a'),
+      ...(fromSpans?.runs.length ? { runs: fromSpans.runs } : {}),
     });
     return n;
   }
@@ -733,12 +880,36 @@ export class Converter {
       for (const [path, o] of Object.entries(spec.overrides)) {
         const { key, node } = this.overrideKey(main, path);
         const cur = { ...(overrides[key] ?? {}) };
-        if (o.text !== undefined) {
+        if (o.spans !== undefined) {
+          if (node.type !== 'text') throw new SpecError(`“${path}” não é um texto`);
+          const { text, runs } = this.spans(o.spans, node.style);
+          cur.text = text;
+          cur.runs = runs;
+        } else if (o.text !== undefined) {
           if (node.type !== 'text') throw new SpecError(`“${path}” não é um texto`);
           cur.text = String(o.text);
+          delete cur.runs;
         }
         if (o.fill !== undefined) cur.fills = this.paints(o.fill);
-        if (o.stroke !== undefined) cur.strokes = this.strokes(o.stroke, node.type === 'path' || node.type === 'line');
+        if (o.stroke !== undefined) {
+          const base = node.strokes ?? [];
+          const list = this.strokes(o.stroke, node.type === 'path' || node.type === 'line');
+          // parte do traço original (espessura, pontas, junções dos ícones) e troca só o que foi informado
+          const onlyColor = typeof o.stroke === 'string' && !/\d\s*px|solid|dashed|dotted/i.test(o.stroke);
+          const given = o.stroke && typeof o.stroke === 'object' && !Array.isArray(o.stroke) ? (o.stroke as Record<string, unknown>) : null;
+          if (base.length && (onlyColor || given)) {
+            cur.strokes = list.map((s, i) => ({
+              ...base[Math.min(i, base.length - 1)],
+              paint: s.paint,
+              ...(given && (given.width ?? given.weight) !== undefined ? { width: s.width } : {}),
+              ...(given && (given.align ?? given.position) !== undefined ? { align: s.align } : {}),
+              ...(given?.dash !== undefined ? { dash: s.dash } : {}),
+              ...(given?.sides !== undefined ? { sides: s.sides } : {}),
+              ...(given?.cap !== undefined ? { cap: s.cap } : {}),
+              ...(given?.join !== undefined ? { join: s.join } : {}),
+            }));
+          } else cur.strokes = list;
+        }
         // "color": a cor que importa na camada (texto: letras; ícone de traço: o traço; resto: o preenchimento)
         if (o.color !== undefined) {
           if (node.type !== 'text' && node.strokes?.length && !node.fills?.length) cur.strokes = node.strokes.map((s) => ({ ...s, paint: this.paint(o.color)! }));
@@ -772,6 +943,8 @@ export class Converter {
     if (spec.fill !== undefined && n.type !== 'text' && n.type !== 'instance' && !(n.type === 'path' && spec.type === 'icon')) n.fills = this.paints(spec.fill);
     if (spec.fill !== undefined && n.type === 'instance') n.fills = this.paints(spec.fill);
     if (spec.stroke !== undefined) n.strokes = this.strokes(spec.stroke, n.type === 'line' || n.type === 'path');
+    const bySide = this.sideStrokes(n.strokes ?? [], spec, n.type === 'line' || n.type === 'path');
+    if (bySide) n.strokes = bySide;
     if (spec.radius !== undefined) n.cornerRadius = Array.isArray(spec.radius) ? (spec.radius.slice(0, 4).map(Number) as [number, number, number, number]) : Number(spec.radius);
     const fx = spec.effects ?? spec.shadow;
     if (fx !== undefined) n.effects = this.effects(fx);
@@ -838,6 +1011,8 @@ export class Converter {
     if (p.fill !== undefined && n.type !== 'text') set('fills', this.paints(p.fill));
     if (n.type === 'text' && (p.color !== undefined || p.fill !== undefined)) set('fills', this.paints(p.color ?? p.fill));
     if (p.stroke !== undefined) set('strokes', this.strokes(p.stroke, n.type === 'line' || n.type === 'path'));
+    const bySide = this.sideStrokes(p.stroke !== undefined ? this.strokes(p.stroke, n.type === 'line' || n.type === 'path') : n.strokes ?? [], p, n.type === 'line' || n.type === 'path');
+    if (bySide) set('strokes', bySide);
     if (p.radius !== undefined) set('cornerRadius', Array.isArray(p.radius) ? p.radius.slice(0, 4).map(Number) : Number(p.radius));
     if (p.effects !== undefined || p.shadow !== undefined) set('effects', this.effects(p.effects ?? p.shadow));
     if (p.layout !== undefined && 'children' in n) set('layout', this.layout(p.layout, n.layout));
@@ -845,9 +1020,22 @@ export class Converter {
     if (p.constraints) set('constraints', { horizontal: p.constraints.horizontal ?? 'left', vertical: p.constraints.vertical ?? 'top' });
     if (p.meta) set('meta', { ...(n.meta ?? {}), ...p.meta });
     if (n.type === 'text') {
-      if (p.text !== undefined) set('text', String(p.text));
       const textKeys = ['font', 'size', 'weight', 'italic', 'lineHeight', 'letterSpacing', 'align', 'verticalAlign', 'decoration', 'case'] as const;
-      if (textKeys.some((k) => p[k] !== undefined)) set('style', this.textStyle(p, n.style));
+      const style = textKeys.some((k) => p[k] !== undefined) ? this.textStyle(p, n.style) : n.style;
+      if (style !== n.style) set('style', style);
+      if (p.spans !== undefined) {
+        const { text, runs } = this.spans(p.spans, style);
+        set('text', text);
+        set('runs', runs.length ? runs : undefined);
+      } else {
+        // texto trocado: os trechos acompanham o que não mudou; o que vale para o texto inteiro sai dos trechos
+        let runs = p.text !== undefined ? runsAfterEdit(n.runs, n.text, String(p.text)) : n.runs ?? [];
+        const len = p.text !== undefined ? String(p.text).length : n.text.length;
+        const cleared = ([['font', 'family'], ['size', 'size'], ['weight', 'weight'], ['italic', 'italic'], ['letterSpacing', 'letterSpacing'], ['decoration', 'decoration'], ['color', 'color'], ['fill', 'color']] as const).filter(([k]) => p[k] !== undefined).map(([, a]) => a);
+        if (cleared.length) runs = clearRunAttr(runs, len, cleared, style);
+        if (p.text !== undefined) set('text', String(p.text));
+        if (n.runs?.length && JSON.stringify(runs) !== JSON.stringify(n.runs)) set('runs', runs.length ? runs : undefined);
+      }
       if (p.autoResize) set('autoResize', p.autoResize === 'fixed' ? 'none' : p.autoResize);
     }
     if ((n.type === 'polygon' || n.type === 'star') && p.points !== undefined) set('points', p.points);
@@ -964,6 +1152,10 @@ function bindProps(root: ContainerNode, specs: NodeSpec[], propIds: Map<string, 
           if (slot === 'text' && n.type !== 'text') throw new SpecError(`bind.text só vale para textos (${n.name})`);
           if (slot === 'component' && n.type !== 'instance') throw new SpecError(`bind.component só vale para instâncias (${n.name})`);
           refs[slot] = id;
+          // a camada ligada mostra o padrão da propriedade, como as instâncias novas
+          const def = root.properties?.find((p) => p.id === id);
+          if (slot === 'text' && def?.type === 'text' && n.type === 'text') n.text = def.default;
+          if (slot === 'visible' && def?.type === 'boolean') n.visible = def.default;
         }
         n.propRefs = refs;
       }

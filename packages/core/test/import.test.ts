@@ -79,6 +79,7 @@ const SCHEMA = defs({
   NodeChange: ['MESSAGE', [
     ['guid', 'GUID'], ['parentIndex', 'ParentIndex'], ['type', 'NodeType'], ['name', 'string'], ['visible', 'bool'], ['opacity', 'float'],
     ['size', 'Vector'], ['transform', 'Matrix'], ['fillPaints', 'Paint', true], ['strokePaints', 'Paint', true], ['strokeWeight', 'float'], ['strokeAlign', 'StrokeAlign'],
+    ['borderStrokeWeightsIndependent', 'bool'], ['borderTopWeight', 'float'], ['borderRightWeight', 'float'], ['borderBottomWeight', 'float'], ['borderLeftWeight', 'float'],
     ['cornerRadius', 'float'], ['stackMode', 'StackMode'], ['stackSpacing', 'float'], ['stackHorizontalPadding', 'float'], ['stackVerticalPadding', 'float'],
     ['stackPrimarySizing', 'StackSize'], ['stackCounterSizing', 'StackSize'], ['stackChildPrimaryGrow', 'float'], ['stackChildAlignSelf', 'AlignSelf'],
     ['textData', 'TextData'], ['derivedTextData', 'TextData'], ['fontName', 'FontName'], ['fontSize', 'float'], ['lineHeight', 'LineHeight'], ['textAutoResize', 'TextAutoResize'],
@@ -148,6 +149,10 @@ function sampleMessage() {
     node([2, 9], [2, 1], '&', 'STICKY', 'Nota', { size: { x: 10, y: 10 }, transform: at(0, 0) }),
     node([2, 20], [0, 1], '"', 'FRAME', 'Detalhe', { size: { x: 360, y: 640 }, transform: at(500, 0), fillPaints: [solid(1, 1, 1)] }),
     node([2, 21], [2, 20], '!', 'RECTANGLE', 'Cartão', { size: { x: 100, y: 100 }, transform: at(20, 20) }),
+    node([2, 22], [2, 20], '"', 'FRAME', 'Linha da tabela', {
+      size: { x: 300, y: 40 }, transform: at(0, 200), strokePaints: [solid(0.9, 0.9, 0.92)], strokeWeight: 1, strokeAlign: 'INSIDE',
+      borderStrokeWeightsIndependent: true, borderTopWeight: 0, borderRightWeight: 0, borderBottomWeight: 1, borderLeftWeight: 0,
+    }),
     // conjunto de variantes
     node([3, 1], [0, 1], '#', 'FRAME', 'Botão', {
       size: { x: 300, y: 80 }, transform: at(0, 800), isStateGroup: true,
@@ -285,6 +290,13 @@ describe('importação de .fig (simulada)', () => {
     expect(r.children.find((c) => c.name === 'Ícone')!.visible).toBe(false);
   });
 
+  it('contornos individuais por lado (Individual strokes)', () => {
+    const row = find(doc, 'Linha da tabela');
+    expect(row.strokes).toHaveLength(1);
+    expect(row.strokes![0]).toMatchObject({ width: 1, align: 'inside', sides: { top: 0, right: 0, bottom: 1, left: 0 } });
+    expect(find(doc, 'Cartão').strokes?.[0]?.sides).toBeUndefined();
+  });
+
   it('blobs de geometria e redes de vetores viram caminhos', () => {
     expect(commandsToPath(blob([[1, 0, 0], [4, 1, 2, 3, 4, 5, 6], [3, 1, 1, 2, 2], 0]))).toBe('M0 0 C1 2 3 4 5 6 Q1 1 2 2 Z');
     // rede: 2 vértices, 1 segmento reto
@@ -333,12 +345,21 @@ describe('importação de .pen (simulada)', () => {
           { type: 'path', id: 'p1', name: 'Seta', width: 48, height: 48, viewBox: [0, 0, 24, 24], geometry: 'M0 0L24 24', stroke: '#000', strokeWidth: 2 },
           { type: 'icon', id: 'm1', name: 'Casa', width: 24, height: 24, icon: 'home', library: 'Material Symbols Outlined', fill: '#333' },
           { type: 'prompt', id: 'x', model: 'qualquer', content: 'texto' },
+          { type: 'frame', id: 'row', name: 'Linha', width: 300, height: 40, stroke: '#E5E7EB', strokeWidth: [0, 1, 1, 0], strokeAlignment: 'inside' },
+          { type: 'frame', id: 'row2', name: 'Linha 2', width: 300, height: 40, stroke: '#E5E7EB', strokeWidth: { bottom: 2 } },
         ],
       },
     ],
   };
   const icons = (library: string, name: string) => (library === 'lucide' && name === 'check' ? { d: 'M4 12 L10 18 L20 6', size: 24, stroke: true, strokeWidth: 2 } : null);
   const { doc, report } = penToDocument({ text: JSON.stringify(main), imports: { L: { name: 'lib', text: JSON.stringify(lib) } }, icons }, 'Teste');
+
+  it('espessura por lado vira contorno individual', () => {
+    const [a, b] = [find(doc, 'Linha'), find(doc, 'Linha 2')];
+    expect(a.strokes![0]).toMatchObject({ width: 1, align: 'inside', sides: { top: 0, right: 1, bottom: 1, left: 0 } });
+    expect(b.strokes![0]).toMatchObject({ width: 2, sides: { top: 0, right: 0, bottom: 2, left: 0 } });
+    expect(report.warnings.join(' ')).not.toMatch(/maior espessura/);
+  });
 
   it('lista dependências para o sistema ler antes', () => {
     const deps = penDependencies(JSON.stringify({ imports: { Q: 'a.pen' }, children: [{ type: 'frame', fill: { type: 'image', url: 'img/a.png' } }, { type: 'ref', descendants: { x: { icon: 'bell' } } }] }));

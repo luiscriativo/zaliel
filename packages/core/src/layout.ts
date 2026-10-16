@@ -1,6 +1,6 @@
 // Auto layout (flexbox simplificado), ajuste de grupos,
 // medida de textos e constraints. Tudo puro: recebe nós e devolve as mudanças.
-import type { ContainerNode, SceneNode, TextNode } from './types';
+import type { ContainerNode, InstanceNode, SceneNode, TextNode } from './types';
 import { boundsOf, nodeMatrix, apply, rectCorners } from './util';
 
 export interface Change {
@@ -15,6 +15,8 @@ export type MeasureText = (node: TextNode, maxWidth: number) => { width: number;
 
 export interface LayoutContext {
   measureText?: MeasureText;
+  /** Tamanho de uma instância que abraça o conteúdo (null = vale o tamanho gravado). */
+  measureInstance?: (n: InstanceNode) => { width: number; height: number } | null;
   changes: Change[];
 }
 
@@ -61,6 +63,14 @@ function sizingOf(c: SceneNode, horiz: boolean) {
 export function layoutNode(n: SceneNode, ctx: LayoutContext, lockW = false, lockH = false): void {
   if (n.type === 'text') {
     measureTextNode(n, ctx);
+    return;
+  }
+  if (n.type === 'instance') {
+    const s = ctx.measureInstance?.(n);
+    if (s) {
+      if (!lockW) set(ctx, n, 'width', s.width);
+      if (!lockH) set(ctx, n, 'height', s.height);
+    }
     return;
   }
   if (!('children' in n)) return;
@@ -140,15 +150,17 @@ function arrange(n: ContainerNode, ctx: LayoutContext, lockW: boolean, lockH: bo
   // Eixo cruzado
   // linhas só com filhos que esticam não definem tamanho: mantêm o tamanho atual do container
   const current = n[C] - padCross;
-  const lineCross = lines.map((line) => {
+  const measureLines = () => lines.map((line) => {
     const sized = line.filter((c) => sizingOf(c, !horiz) !== 'fill' && L.align !== 'stretch');
     return sized.length ? Math.max(0, ...sized.map((c) => c[C])) : lines.length === 1 ? Math.max(0, current) : Math.max(0, ...line.map((c) => c[C]));
   });
-  if (hugCross) {
+  let lineCross = measureLines();
+  const hugCrossSize = () => {
     const crossGap = L.crossGap ?? L.gap;
     const content = lineCross.reduce((s, v) => s + v, 0) + crossGap * Math.max(0, lines.length - 1);
     set(ctx, n, C, content + padCross);
-  }
+  };
+  if (hugCross) hugCrossSize();
   const crossSpace = n[C] - padCross;
   for (const [li, line] of lines.entries()) {
     const lineSize = lines.length > 1 ? lineCross[li] : crossSpace;
@@ -168,6 +180,16 @@ function arrange(n: ContainerNode, ctx: LayoutContext, lockW: boolean, lockH: bo
     layoutNode(c, ctx, fillW, fillH);
   }
 
+  // Quem refez o layout pode ter mudado no outro eixo (um texto ou um wrap que quebra diferente na
+  // largura nova): o tamanho que abraça o conteúdo é medido de novo
+  if (resized.size) {
+    if (hugMain) set(ctx, n, M, kids.reduce((s, c) => s + c[M], 0) + L.gap * Math.max(0, kids.length - 1) + padMain);
+    if (hugCross) {
+      lineCross = measureLines();
+      hugCrossSize();
+    }
+  }
+
   // Posições
   const crossGap = L.crossGap ?? L.gap;
   let crossCursor = horiz ? pt : pl;
@@ -182,7 +204,7 @@ function arrange(n: ContainerNode, ctx: LayoutContext, lockW: boolean, lockH: bo
       if (L.justify === 'center') cursor += (space - used) / 2;
       else if (L.justify === 'end') cursor += space - used;
     }
-    const lineSize = lines.length > 1 ? lineCross[li] : crossSpace;
+    const lineSize = lines.length > 1 ? lineCross[li] : n[C] - padCross;
     for (const c of line) {
       set(ctx, c, P, cursor);
       let q = crossCursor;

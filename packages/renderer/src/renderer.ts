@@ -6,7 +6,9 @@ import {
   type SceneNode,
   type Stroke,
   type TextNode,
+  type TextStyle,
   type ZalDocument,
+  textSegments,
   type Page,
   type Mat,
   nodeMatrix,
@@ -15,6 +17,12 @@ import {
   IDENTITY,
   parseHex,
   resolvePaint,
+  radii,
+  acceptsStrokeSides,
+  strokeSides,
+  strokeWeight,
+  sideStrokeGeometry,
+  type StrokeSides,
 } from '@zaliel/core';
 import type { FontRegistry } from './fonts';
 import { booleanPath, localShapePath, toSkMatrix } from './geometry';
@@ -80,14 +88,39 @@ export class TextEngine {
     return t;
   }
 
+  /** Família que existe (as desconhecidas caem na Inter). */
+  family(f: string): string {
+    return this.fonts.has(f) ? f : 'Inter';
+  }
+
+  /** Estilo do CanvasKit para um estilo de texto. A altura de linha é sempre a do texto inteiro. */
+  private skTextStyle(s: TextStyle, lineHeight: number | undefined) {
+    const ck = this.ck;
+    const decoration = s.decoration === 'underline' ? ck.UnderlineDecoration : s.decoration === 'strikethrough' ? ck.LineThroughDecoration : ck.NoDecoration;
+    return {
+      color: ck.BLACK,
+      fontFamilies: [this.family(s.family), 'Inter'],
+      fontSize: s.size,
+      fontStyle: { weight: this.weightEnum(s.weight), slant: s.italic ? ck.FontSlant.Italic : ck.FontSlant.Upright },
+      letterSpacing: s.letterSpacing ?? 0,
+      decoration,
+      ...(lineHeight ? { heightMultiplier: lineHeight / s.size, halfLeading: true } : {}),
+    };
+  }
+
   /** Parágrafo pronto para uma largura (Infinity = sem quebra). Fica em cache. */
   paragraph(n: TextNode, width: number, paint?: SkPaint, paintKey?: unknown): Paragraph {
     const ck = this.ck;
     const st = n.style;
-    const family = this.fonts.has(st.family) ? st.family : 'Inter';
-    this.fonts.ensure(family, st.weight, !!st.italic);
-    const ready = this.fonts.isReady(family, st.weight, !!st.italic);
-    const key = JSON.stringify([n.text, st, width, ready, paint ? [paintKey ?? n.fills, n.width, n.height] : null]);
+    // trechos com estilo próprio (negrito, cor…): cada um entra com o seu estilo
+    const segs = n.text && n.runs?.length ? textSegments(n.text, st, n.runs) : null;
+    let ready = true;
+    for (const s of segs ? segs.map((g) => g.style) : [st]) {
+      const family = this.family(s.family);
+      this.fonts.ensure(family, s.weight, !!s.italic);
+      ready &&= this.fonts.isReady(family, s.weight, !!s.italic);
+    }
+    const key = JSON.stringify([n.text, st, segs ? n.runs : null, width, ready, paint ? [paintKey ?? n.fills, n.width, n.height] : null]);
     const hit = this.cache.get(key);
     if (hit) {
       this.cache.delete(key);
@@ -95,26 +128,39 @@ export class TextEngine {
       return hit;
     }
     const lh = typeof st.lineHeight === 'number' ? st.lineHeight : undefined;
-    const decoration = st.decoration === 'underline' ? ck.UnderlineDecoration : st.decoration === 'strikethrough' ? ck.LineThroughDecoration : ck.NoDecoration;
-    const textStyle = {
-      color: ck.BLACK,
-      fontFamilies: [family, 'Inter'],
-      fontSize: st.size,
-      fontStyle: { weight: this.weightEnum(st.weight), slant: st.italic ? ck.FontSlant.Italic : ck.FontSlant.Upright },
-      letterSpacing: st.letterSpacing ?? 0,
-      decoration,
-      ...(lh ? { heightMultiplier: lh / st.size, halfLeading: true } : {}),
-    };
+    const textStyle = this.skTextStyle(st, lh);
     const align = { left: ck.TextAlign.Left, center: ck.TextAlign.Center, right: ck.TextAlign.Right, justify: ck.TextAlign.Justify }[st.align ?? 'left'];
     const pStyle = new ck.ParagraphStyle({ textStyle, textAlign: align });
     const builder = ck.ParagraphBuilder.MakeFromFontProvider(pStyle, this.fonts.provider);
-    if (paint) {
-      const bg = new ck.Paint();
-      bg.setColor(ck.TRANSPARENT);
-      builder.pushPaintStyle(new ck.TextStyle(textStyle), paint, bg);
-      bg.delete();
+    const bg = paint ? new ck.Paint() : null;
+    bg?.setColor(ck.TRANSPARENT);
+    const text = this.transformCase(n.text || ' ', st.case);
+    if (!segs) {
+      if (paint) builder.pushPaintStyle(new ck.TextStyle(textStyle), paint, bg!);
+      builder.addText(text);
+    } else {
+      // maiúsculas que mudam o tamanho do texto (ß → SS) são convertidas pedaço a pedaço
+      const sameLength = text.length === n.text.length;
+      const own: SkPaint[] = [];
+      for (const g of segs) {
+        const ts = new ck.TextStyle(this.skTextStyle(g.style, lh));
+        if (paint) {
+          let fg = paint;
+          if (g.color) {
+            fg = new ck.Paint();
+            fg.setAntiAlias(true);
+            const c = parseHex(g.color);
+            fg.setColor(ck.Color(c.r, c.g, c.b, c.a));
+            own.push(fg);
+          }
+          builder.pushPaintStyle(ts, fg, bg!);
+        } else builder.pushStyle(ts);
+        builder.addText(sameLength ? text.slice(g.start, g.end) : this.transformCase(n.text.slice(g.start, g.end), st.case));
+        builder.pop();
+      }
+      for (const p of own) p.delete();
     }
-    builder.addText(this.transformCase(n.text || ' ', st.case));
+    bg?.delete();
     const p = builder.build();
     builder.delete();
     p.layout(width === Infinity ? 1e6 : Math.max(1, width));
@@ -138,6 +184,19 @@ export class TextEngine {
     for (const p of this.cache.values()) p.delete();
     this.cache.clear();
   }
+}
+
+/** Posição UTF-16 de cada byte UTF-8 do texto (o CanvasKit conta as letras em UTF-8). */
+function utf8ToUtf16(text: string): number[] {
+  const out: number[] = [];
+  for (let i = 0; i < text.length; i++) {
+    const c = text.codePointAt(i)!;
+    const bytes = c < 0x80 ? 1 : c < 0x800 ? 2 : c < 0x10000 ? 3 : 4;
+    for (let b = 0; b < bytes; b++) out.push(i);
+    if (c > 0xffff) i++;
+  }
+  out.push(text.length);
+  return out;
 }
 
 export class Renderer {
@@ -436,7 +495,7 @@ export class Renderer {
     // container sem recorte pode ter filhos fora da caixa: só some se for grupo (a caixa envolve os filhos)
     if ('children' in n && n.children.length && n.type !== 'group' && n.type !== 'boolean' && !n.clip) return false;
     let pad = 2 / this.lod;
-    for (const s of n.strokes ?? []) pad = Math.max(pad, s.width);
+    for (const s of n.strokes ?? []) pad = Math.max(pad, strokeWeight(s));
     for (const e of n.effects ?? []) pad = Math.max(pad, 'blur' in e ? e.blur * 1.5 + Math.abs(e.x) + Math.abs(e.y) + (e.spread ?? 0) : e.radius * 1.5);
     const c = this.cull;
     return b.x + b.width + pad < c.x0 || b.y + b.height + pad < c.y0 || b.x - pad > c.x1 || b.y - pad > c.y1;
@@ -556,10 +615,13 @@ export class Renderer {
   }
 
   private drawStroke(canvas: Canvas, n: SceneNode, path: SkPath | null, s: Stroke): void {
-    if (s.visible === false || s.width <= 0) return;
+    if (s.visible === false || strokeWeight(s) <= 0) return;
     const ck = this.ck;
     if (n.type === 'text') return; // contorno de texto fica para depois
     if (!path) return;
+    const sides = acceptsStrokeSides(n) ? strokeSides(s) : null;
+    if (sides) return this.drawSideStroke(canvas, n, s, sides);
+    if (s.width <= 0) return;
     const p = this.skPaint(s.paint, n.width, n.height, 'stroke');
     if (!p) return;
     const open = n.type === 'line' || (n.type === 'path' && !/z\s*$/i.test(n.d.trim()));
@@ -576,6 +638,39 @@ export class Renderer {
     else if (align === 'outside') canvas.clipPath(path, ck.ClipOp.Difference, true);
     canvas.drawPath(path, p);
     canvas.restore();
+  }
+
+  /** Contorno com espessura por lado: faixa preenchida (liso) ou linha central recortada por lado (tracejado). */
+  private drawSideStroke(canvas: Canvas, n: SceneNode, s: Stroke, sides: StrokeSides): void {
+    const ck = this.ck;
+    const g = sideStrokeGeometry(n.width, n.height, radii(n), sides, s.align);
+    const svg = (d: string) => {
+      const p = ck.Path.MakeFromSVGString(d);
+      return p ? this.t(p) : null;
+    };
+    if (!s.dash?.length) {
+      const ring = svg(g.ring);
+      const p = this.skPaint(s.paint, n.width, n.height, 'fill');
+      if (!ring || !p) return;
+      ring.setFillType(ck.FillType.EvenOdd);
+      canvas.drawPath(ring, p);
+      return;
+    }
+    const center = svg(g.center);
+    if (!center) return;
+    for (const wd of g.wedges) {
+      const clip = svg(wd.clip);
+      const p = this.skPaint(s.paint, n.width, n.height, 'stroke');
+      if (!clip || !p) continue;
+      p.setStrokeWidth(wd.width);
+      p.setStrokeCap(s.cap === 'round' ? ck.StrokeCap.Round : s.cap === 'square' ? ck.StrokeCap.Square : ck.StrokeCap.Butt);
+      const fx = ck.PathEffect.MakeDash(s.dash.length % 2 ? [...s.dash, ...s.dash] : s.dash, 0);
+      if (fx) p.setPathEffect(this.t(fx));
+      canvas.save();
+      canvas.clipPath(clip, ck.ClipOp.Intersect, true);
+      canvas.drawPath(center, p);
+      canvas.restore();
+    }
   }
 
   /**
@@ -653,9 +748,10 @@ export class Renderer {
    */
   textOutline(n: TextNode): string | null {
     const st = n.style;
-    const family = this.text.fonts.has(st.family) ? st.family : 'Inter';
-    const font = this.text.fonts.outlineFont(family, st.weight, !!st.italic) ?? this.text.fonts.outlineFont('Inter', st.weight, !!st.italic);
-    if (!font) return null;
+    const fontFor = (s: TextStyle) => this.text.fonts.outlineFont(this.text.family(s.family), s.weight, !!s.italic) ?? this.text.fonts.outlineFont('Inter', s.weight, !!s.italic);
+    const baseFont = fontFor(st);
+    if (!baseFont) return null;
+    let font = baseFont;
     const parts: string[] = [];
     const r = (v: number) => Math.round(v * 100) / 100;
     // glifo na origem (linha de base em y = 0) levado pela matriz [a, b, c, d, e, f]
@@ -691,26 +787,37 @@ export class Renderer {
       if (st.verticalAlign === 'middle') oy = (n.height - h) / 2;
       else if (st.verticalAlign === 'bottom') oy = n.height - h;
     }
-    const scale = st.size / font.unitsPerEm;
-    const post = font.tables.post as { underlinePosition?: number; underlineThickness?: number } | undefined;
-    const os2 = font.tables.os2 as { yStrikeoutPosition?: number; yStrikeoutSize?: number } | undefined;
+    // trechos com estilo próprio: cada pedaço desenhado pelo CanvasKit usa a fonte do seu trecho
+    const segs = n.text && n.runs?.length ? textSegments(n.text, st, n.runs) : null;
+    const index = segs ? utf8ToUtf16(this.text.transformCase(n.text, st.case)) : null;
+    const styleAt = (offset: number): TextStyle => {
+      if (!segs || !index) return st;
+      const at = index[Math.min(offset, index.length - 1)] ?? 0;
+      return (segs.find((g) => g.start <= at && at < g.end) ?? segs[segs.length - 1]).style;
+    };
     for (const line of p.getShapedLines()) {
-      let x0 = Infinity, x1 = -Infinity;
       for (const run of line.runs) {
+        if (!run.glyphs.length) continue;
+        const rs = styleAt(run.offsets[0]);
+        const f = rs === st ? baseFont : fontFor(rs);
+        if (!f) return null; // a fonte do trecho ainda não carregou
+        font = f;
         for (let i = 0; i < run.glyphs.length; i++) {
           const x = run.positions[i * 2], y = run.positions[i * 2 + 1] + oy;
           glyph(run.glyphs[i], run.size, [1, 0, 0, 1, x, y]);
         }
-        x0 = Math.min(x0, run.positions[0]);
-        x1 = Math.max(x1, run.positions[run.glyphs.length * 2]);
-      }
-      // sublinhado e tachado também viram forma
-      if (x1 > x0 && st.decoration === 'underline') {
-        const t = (post?.underlineThickness || font.unitsPerEm * 0.07) * scale;
-        rect(x0, line.baseline + oy - (post?.underlinePosition ?? -font.unitsPerEm * 0.1) * scale - t / 2, x1 - x0, t);
-      } else if (x1 > x0 && st.decoration === 'strikethrough') {
-        const t = (os2?.yStrikeoutSize || font.unitsPerEm * 0.06) * scale;
-        rect(x0, line.baseline + oy - (os2?.yStrikeoutPosition ?? font.unitsPerEm * 0.3) * scale - t / 2, x1 - x0, t);
+        // sublinhado e tachado também viram forma
+        const x0 = run.positions[0], x1 = run.positions[run.glyphs.length * 2];
+        const scale = run.size / font.unitsPerEm;
+        const post = font.tables.post as { underlinePosition?: number; underlineThickness?: number } | undefined;
+        const os2 = font.tables.os2 as { yStrikeoutPosition?: number; yStrikeoutSize?: number } | undefined;
+        if (x1 > x0 && rs.decoration === 'underline') {
+          const t = (post?.underlineThickness || font.unitsPerEm * 0.07) * scale;
+          rect(x0, line.baseline + oy - (post?.underlinePosition ?? -font.unitsPerEm * 0.1) * scale - t / 2, x1 - x0, t);
+        } else if (x1 > x0 && rs.decoration === 'strikethrough') {
+          const t = (os2?.yStrikeoutSize || font.unitsPerEm * 0.06) * scale;
+          rect(x0, line.baseline + oy - (os2?.yStrikeoutPosition ?? font.unitsPerEm * 0.3) * scale - t / 2, x1 - x0, t);
+        }
       }
     }
     return parts.join('');

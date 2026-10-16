@@ -20,6 +20,7 @@ import type {
   Style,
   TextNode,
   TextStyle,
+  TextRun,
   Transition,
   Variable,
   VariableCollection,
@@ -27,7 +28,8 @@ import type {
 } from '../types';
 import { decodeMessage, decodeSchema, type KiwiValue } from './kiwi';
 import { bakePath, countNodes, imageMime, makeAsset, newDocument, placement, rgbaHex, r2, weightFromStyle, Warnings, type ImportResult } from './common';
-import { invert } from '../util';
+import { invert, parseHex, toHex } from '../util';
+import { normalizeRuns, type RunAttrs } from '../text';
 import { variantName } from '../components';
 import { textStyleOf } from '../styles';
 
@@ -296,12 +298,17 @@ export function convertMessage(msg: N, images: Record<string, Uint8Array>, name:
   const paints = (list: unknown): Paint[] => ((list ?? []) as N[]).map((p) => paint(p)).filter(Boolean) as Paint[];
   const strokes = (n: N): Stroke[] | undefined => {
     const list = paints(n.strokePaints);
-    if (!list.length || !n.strokeWeight) return undefined;
+    const independent = n.borderStrokeWeightsIndependent && (n.borderTopWeight || n.borderRightWeight || n.borderBottomWeight || n.borderLeftWeight);
+    if (!list.length || (!n.strokeWeight && !independent)) return undefined;
     const align = n.strokeAlign === 'INSIDE' ? 'inside' : n.strokeAlign === 'OUTSIDE' ? 'outside' : 'center';
     const cap = n.strokeCap === 'ROUND' ? 'round' : n.strokeCap === 'SQUARE' ? 'square' : undefined;
     const join = n.strokeJoin === 'ROUND' ? 'round' : n.strokeJoin === 'BEVEL' ? 'bevel' : undefined;
     const dash = Array.isArray(n.dashPattern) && n.dashPattern.length ? (n.dashPattern as number[]).map(r2) : undefined;
-    return list.map((p) => ({ paint: p, width: r2(n.strokeWeight), align, ...(cap ? { cap } : {}), ...(join ? { join } : {}), ...(dash ? { dash } : {}) }) as Stroke);
+    // "Individual strokes" do Figma: espessura própria em cada lado
+    const sides = n.borderStrokeWeightsIndependent
+      ? { top: r2(n.borderTopWeight ?? 0), right: r2(n.borderRightWeight ?? 0), bottom: r2(n.borderBottomWeight ?? 0), left: r2(n.borderLeftWeight ?? 0) }
+      : undefined;
+    return list.map((p) => ({ paint: p, width: r2(n.strokeWeight), align, ...(sides ? { sides } : {}), ...(cap ? { cap } : {}), ...(join ? { join } : {}), ...(dash ? { dash } : {}) }) as Stroke);
   };
   const effects = (list: unknown): Effect[] | undefined => {
     const out: Effect[] = [];
@@ -356,6 +363,50 @@ export function convertMessage(msg: N, images: Record<string, Uint8Array>, name:
     const kase = { UPPER: 'upper', LOWER: 'lower', TITLE: 'title' }[n.textCase as string];
     if (kase) st.case = kase as TextStyle['case'];
     return st;
+  }
+
+  /** Trechos com estilo próprio: cada letra aponta (characterStyleIDs) para uma linha da tabela de estilos. */
+  function textRuns(n: N, base: TextStyle, text: string): TextRun[] {
+    const ids = (n.textData?.characterStyleIDs ?? []) as number[];
+    const table = (n.textData?.styleOverrideTable ?? []) as N[];
+    if (!ids.length || !table.length) return [];
+    const byStyle = new Map(table.map((o) => [o.styleID as number, o]));
+    const runs: TextRun[] = [];
+    const end = Math.min(ids.length, text.length);
+    for (let i = 0; i < end; ) {
+      let j = i + 1;
+      while (j < end && ids[j] === ids[i]) j++;
+      const o = ids[i] ? byStyle.get(ids[i]) : undefined;
+      if (o) runs.push({ start: i, end: j, ...runAttrs(o, base) });
+      i = j;
+    }
+    return normalizeRuns(runs, text.length, base);
+  }
+
+  function runAttrs(o: N, base: TextStyle): RunAttrs {
+    const a: RunAttrs = {};
+    if (o.fontName?.family) {
+      a.family = o.fontName.family;
+      fonts.add(a.family!);
+    }
+    if (o.fontName?.style) {
+      a.weight = weightFromStyle(o.fontName.style);
+      a.italic = /italic|oblique/i.test(o.fontName.style);
+    }
+    if (typeof o.fontSize === 'number') a.size = r2(o.fontSize);
+    if (o.textDecoration) a.decoration = o.textDecoration === 'UNDERLINE' ? 'underline' : o.textDecoration === 'STRIKETHROUGH' ? 'strikethrough' : 'none';
+    const ls = o.letterSpacing;
+    if (typeof ls?.value === 'number') a.letterSpacing = r2(ls.units === 'PERCENT' ? ((a.size ?? base.size) * ls.value) / 100 : ls.value);
+    if (o.fillPaints) {
+      const list = paints(o.fillPaints).filter((p) => p.visible !== false);
+      const solid = list.find((p) => p.type === 'solid') as Extract<Paint, { type: 'solid' }> | undefined;
+      if (solid) {
+        const c = parseHex(solid.color);
+        a.color = toHex({ ...c, a: c.a * (solid.opacity ?? 1) });
+      }
+      if (list.some((p) => p.type !== 'solid')) warn.add('Trechos de texto com degradê ou imagem ficaram com cor sólida');
+    }
+    return a;
   }
 
   // ── Propriedades de componente (ids de definições filhas apontam para a do conjunto) ──
@@ -651,7 +702,8 @@ export function convertMessage(msg: N, images: Record<string, Uint8Array>, name:
         fonts.add(style.family);
         const autoResize = n.textAutoResize === 'WIDTH_AND_HEIGHT' ? 'width' : n.textAutoResize === 'HEIGHT' ? 'height' : 'none';
         const t = { ...common, type: 'text', text: String(n.textData?.characters ?? ''), style, autoResize } as TextNode;
-        if (((n.textData?.styleOverrideTable ?? []) as unknown[]).length > 1) warn.add('Textos com vários estilos no mesmo bloco usam só o estilo principal');
+        const runs = textRuns(n, style, t.text);
+        if (runs.length) t.runs = runs;
         return t;
       }
       case 'VECTOR':

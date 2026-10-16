@@ -1,9 +1,10 @@
 // Camada por cima do desenho: seleção, alças, guias, nomes dos frames, medidas e caneta.
 import type { Canvas, CanvasKit, Paint as SkPaint, Paragraph } from 'canvaskit-wasm';
-import { apply, multiply, parseHex, rectCorners, gridBands, gridLines, prototypeLinks, startScreen, walk, type Mat, type Point, type Rect, type SceneNode } from '@zaliel/core';
+import { apply, multiply, parseHex, rectCorners, gridBands, gridLines, startScreen, walk, type Mat, type Point, type SceneNode } from '@zaliel/core';
 import { toSkMatrix } from '@zaliel/renderer';
 import type { CanvasHost } from './host';
 import { RULER } from './interaction';
+import { curve, handlePoint, linkCurves, screenRect, type LinkCurve } from './links';
 
 const SEL = '#b5822f';
 const COMPONENT = '#7d5ba6';
@@ -372,20 +373,14 @@ export function drawOverlay(host: CanvasHost, canvas: Canvas, ck: CanvasKit): vo
         canvas.drawParagraph(p, x + 5, y + 2);
       }
     }
-    for (const link of prototypeLinks(ed.page)) {
-      const fromB = screenRect(ed, link.from), toB = screenRect(ed, link.to);
-      if (!fromB || !toB) continue;
-      const active = ed.selection.includes(link.from) || ed.selection.includes(link.to);
-      const forward = toB.x >= fromB.x + fromB.width / 2;
-      const a = { x: forward ? fromB.x + fromB.width : fromB.x, y: fromB.y + fromB.height / 2 };
-      const e = { x: forward ? toB.x : toB.x + toB.width, y: toB.y + Math.min(toB.height / 2, 60) };
-      const dx = Math.max(40, Math.abs(e.x - a.x) / 2) * (forward ? 1 : -1);
+    const ld = it?.linkDrag?.moved ? it.linkDrag : null;
+    const drawCurve = (c: Omit<LinkCurve, 'from' | 'to' | 'interaction'>, active: boolean, overlay: boolean, endHandle: boolean) => {
       const pb = new ck.PathBuilder();
-      pb.moveTo(a.x, a.y).cubicTo(a.x + dx, a.y, e.x - dx, e.y, e.x, e.y);
+      pb.moveTo(c.a.x, c.a.y).cubicTo(c.c1.x, c.c1.y, c.c2.x, c.c2.y, c.e.x, c.e.y);
       const path = pb.detachAndDelete();
       const line = stroke(SEL, active ? 2 : 1.25, active ? 1 : 0.55);
       // sobreposições (modais) em tracejado
-      const dash = link.interaction.action === 'overlay' ? ck.PathEffect.MakeDash([6, 4], 0) : null;
+      const dash = overlay ? ck.PathEffect.MakeDash([6, 4], 0) : null;
       if (dash) line.setPathEffect(dash);
       canvas.drawPath(path, line);
       if (dash) {
@@ -393,9 +388,41 @@ export function drawOverlay(host: CanvasHost, canvas: Canvas, ck: CanvasKit): vo
         dash.delete();
       }
       path.delete();
-      canvas.drawCircle(a.x, a.y, 3.5, fill(SEL, active ? 1 : 0.6));
-      const dir = forward ? -1 : 1;
+      canvas.drawCircle(c.a.x, c.a.y, 3.5, fill(SEL, active ? 1 : 0.6));
+      const dir = c.forward ? -1 : 1;
+      const e = c.e;
       poly([e, { x: e.x + dir * 8, y: e.y - 4.5 }, { x: e.x + dir * 8, y: e.y + 4.5 }], fill(SEL, active ? 1 : 0.6));
+      // ponta que dá para arrastar para outra tela
+      if (endHandle) {
+        canvas.drawCircle(e.x, e.y, 4.5, fill('#ffffff'));
+        canvas.drawCircle(e.x, e.y, 4.5, stroke(SEL, 1.5));
+      }
+    };
+    for (const c of linkCurves(ed)) {
+      if (ld && ld.existing && c.from === ld.from) continue; // a que está sendo puxada segue o cursor
+      const active = ed.selection.includes(c.from) || ed.selection.includes(c.to) || it?.linkHover === c.from;
+      drawCurve(c, active, c.interaction.action === 'overlay', ed.selection.includes(c.from));
+    }
+    // alça "+" da camada selecionada: puxar dela até uma tela cria a ligação
+    if (!ld && ed.selection.length === 1 && !ed.isInner(ed.selection[0]) && !ed.vectorEdit) {
+      const h = handlePoint(ed, ed.selection[0]);
+      if (h) {
+        canvas.drawCircle(h.x, h.y, 7, fill(SEL));
+        canvas.drawCircle(h.x, h.y, 7, stroke('#ffffff', 1.5));
+        const plus = stroke('#ffffff', 1.6);
+        canvas.drawLine(h.x - 3.5, h.y, h.x + 3.5, h.y, plus);
+        canvas.drawLine(h.x, h.y - 3.5, h.x, h.y + 3.5, plus);
+      }
+    }
+    // arrastando: a linha segue o cursor e a tela de destino acende
+    if (ld) {
+      const fromB = screenRect(ed, ld.from);
+      const toB = ld.target ? screenRect(ed, ld.target) : null;
+      if (toB) {
+        canvas.drawRect(ck.LTRBRect(toB.x, toB.y, toB.x + toB.width, toB.y + toB.height), fill(SEL, 0.08));
+        canvas.drawRect(ck.LTRBRect(toB.x, toB.y, toB.x + toB.width, toB.y + toB.height), stroke(SEL, 2));
+      }
+      if (fromB) drawCurve(curve(fromB, toB ?? ld.at), true, ld.existing?.action === 'overlay', false);
     }
   }
 
@@ -405,13 +432,6 @@ export function drawOverlay(host: CanvasHost, canvas: Canvas, ck: CanvasKit): vo
   for (const p of paints) p.delete();
 }
 
-/** Caixa de um nó em px de tela. */
-function screenRect(ed: CanvasHost['editor'], id: string): Rect | null {
-  if (!ed.model.index.get(id)) return null;
-  const b = ed.worldBounds(id);
-  const a = ed.worldToScreen({ x: b.x, y: b.y });
-  return { x: a.x, y: a.y, width: b.width * ed.viewport.zoom, height: b.height * ed.viewport.zoom };
-}
 
 type PaintFn = (color: string, alpha?: number) => SkPaint;
 
