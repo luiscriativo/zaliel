@@ -15,6 +15,9 @@ files:
   - out/**/*
   - package.json
   - "!**/*.map"
+# a ponte stdio roda fora do app (com o próprio executável), então fica fora do .asar
+asarUnpack:
+  - out/main/ponte.js
 
 extraResources:
   - from: ../../LICENSE

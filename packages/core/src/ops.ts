@@ -10,7 +10,7 @@ export type Op =
   | { op: 'insert'; parent: string; index: number; node: SceneNode | Page }
   | { op: 'remove'; id: string }
   | { op: 'move'; id: string; parent: string; index: number }
-  | { op: 'doc'; key: 'name' | 'variables' | 'libraries' | 'settings' | 'meta'; value: unknown }
+  | { op: 'doc'; key: 'name' | 'variables' | 'styles' | 'libraries' | 'settings' | 'meta' | 'comments'; value: unknown }
   | { op: 'asset'; key: string; value: Asset | undefined };
 
 function getPath(obj: Record<string, unknown>, path: string[]): unknown {

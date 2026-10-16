@@ -16,6 +16,9 @@ const api = {
   saveFile: (path: string | null, text: string, suggestedName: string) => ipcRenderer.invoke('file:save', { path, text, suggestedName }),
   exportFile: (data: Uint8Array | string, name: string, kind: string) => ipcRenderer.invoke('file:export', { data, name, kind }),
   pickImages: () => ipcRenderer.invoke('file:pick-images'),
+  importDesign: (file?: string) => ipcRenderer.invoke('file:import', file),
+  exportBatch: (files: unknown) => ipcRenderer.invoke('file:export-batch', files),
+  askUnsaved: (name: string) => ipcRenderer.invoke('dialog:unsaved', name),
   revealFile: (p: string) => ipcRenderer.invoke('file:reveal', p),
   recent: () => ipcRenderer.invoke('recent:list'),
   addRecent: (p: string, name: string) => ipcRenderer.invoke('recent:add', p, name),
@@ -29,6 +32,24 @@ const api = {
   setWindowState: (s: unknown) => ipcRenderer.send('window:state', s),
   newWindow: () => ipcRenderer.send('window:new'),
   confirmClose: () => ipcRenderer.send('window:confirm-close'),
+  automation: {
+    info: () => ipcRenderer.invoke('automation:info'),
+    regenerate: () => ipcRenderer.invoke('automation:regenerate'),
+    readBinary: (p: string) => ipcRenderer.invoke('automation:read-binary', p),
+    writeFile: (p: string, data: string, base64: boolean) => ipcRenderer.invoke('automation:write-file', p, data, base64),
+    /** O editor está pronto: passa a receber pedidos. `handler` devolve o resultado (ou lança erro). */
+    serve: (handler: (payload: unknown) => Promise<unknown>) => {
+      ipcRenderer.removeAllListeners('automation:request');
+      ipcRenderer.on('automation:request', async (_e, msg: { id: number; payload: unknown }) => {
+        try {
+          ipcRenderer.send('automation:response', { id: msg.id, result: await handler(msg.payload) });
+        } catch (err) {
+          ipcRenderer.send('automation:response', { id: msg.id, error: String((err as Error)?.message ?? err) });
+        }
+      });
+      ipcRenderer.send('automation:ready');
+    },
+  },
   update: {
     status: () => ipcRenderer.invoke('update:status'),
     check: () => ipcRenderer.invoke('update:check'),

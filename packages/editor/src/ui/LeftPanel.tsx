@@ -1,28 +1,38 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   ChevronRight, ChevronDown, Eye, EyeOff, Lock, LockOpen, Plus, Frame, Square, Circle, Minus, Triangle, Star, Type, Spline, Component, Diamond, Group, Image as ImageIcon, Rows3, Columns3,
-  Library, RefreshCw, Trash2, Search, FolderOpen,
+  Library, RefreshCw, Trash2, Search, FolderOpen, Layers2, SquaresUnite, SquaresSubtract, SquaresIntersect, SquaresExclude,
 } from 'lucide-react';
 import type { ContainerNode, SceneNode } from '@zaliel/core';
 import { useEditor } from './hooks';
 import { Menu, type MenuEntry } from './Menu';
 import { IconBtn } from './controls';
+import { CommentsPanel } from './Comments';
 
 export function LeftPanel() {
-  const [tab, setTab] = useState<'layers' | 'assets'>('layers');
+  const ed = useEditor('ui', 'doc');
+  const tab = ed.leftTab;
+  const setTab = (t: typeof tab) => {
+    ed.leftTab = t;
+    ed.emit('ui');
+  };
+  const open = ed.comments.filter((c) => !c.resolved).length;
   return (
     <aside className="panel left">
       <div className="tabs">
         <button className={tab === 'layers' ? 'on' : ''} onClick={() => setTab('layers')}>Camadas</button>
         <button className={tab === 'assets' ? 'on' : ''} onClick={() => setTab('assets')}>Recursos</button>
+        <button className={tab === 'comments' ? 'on' : ''} onClick={() => setTab('comments')}>Comentários{open ? <span className="count">{open}</span> : null}</button>
       </div>
       {tab === 'layers' ? (
         <>
           <Pages />
           <Layers />
         </>
-      ) : (
+      ) : tab === 'assets' ? (
         <Assets />
+      ) : (
+        <CommentsPanel />
       )}
     </aside>
   );
@@ -98,6 +108,10 @@ export function kindIcon(n: SceneNode, size = 13) {
       return <Group {...p} />;
     case 'component':
       return <Component {...p} />;
+    case 'component-set':
+      return <Layers2 {...p} />;
+    case 'boolean':
+      return n.booleanOp === 'subtract' ? <SquaresSubtract {...p} /> : n.booleanOp === 'intersect' ? <SquaresIntersect {...p} /> : n.booleanOp === 'exclude' ? <SquaresExclude {...p} /> : <SquaresUnite {...p} />;
     case 'instance':
       return <Diamond {...p} />;
     case 'rect':
@@ -128,6 +142,20 @@ function Layers() {
   const dragIds = useRef<string[]>([]);
   const anchor = useRef<string | null>(null);
   const listRef = useRef<HTMLDivElement>(null);
+
+  // "Renomear" (menu ou Ctrl+R): abre o nome da camada para edição
+  useEffect(() => {
+    const fn = (e: Event) => {
+      const id = (e as CustomEvent<string>).detail;
+      const need = new Set(expanded);
+      for (const a of ed.model.index.ancestors(id)) need.add(a.id);
+      setExpanded(need);
+      setRenaming(id);
+      requestAnimationFrame(() => listRef.current?.querySelector(`[data-id="${CSS.escape(id)}"]`)?.scrollIntoView({ block: 'nearest' }));
+    };
+    window.addEventListener('zaliel:rename-layer', fn);
+    return () => window.removeEventListener('zaliel:rename-layer', fn);
+  }, [ed, expanded]);
 
   // abre os ancestrais da seleção e rola até ela
   const selKey = ed.selection.join(',');
@@ -238,7 +266,7 @@ function Layers() {
         const inSel = !isSel && ed.model.index.ancestors(n.id).some((a) => selected.has(a.id));
         const hasKids = 'children' in n && n.children.length > 0;
         const open = expanded.has(n.id);
-        const comp = n.type === 'component' || n.type === 'instance';
+        const comp = n.type === 'component' || n.type === 'instance' || n.type === 'component-set';
         const dropCls = drop?.id === n.id ? `drop-${drop.where}` : '';
         return (
           <div
@@ -326,19 +354,32 @@ function Layers() {
           </div>
         );
       })}
-      {menu && <Menu x={menu.x} y={menu.y} onClose={() => setMenu(null)} items={LAYER_MENU} />}
+      {menu && <Menu x={menu.x} y={menu.y} onClose={() => setMenu(null)} items={LAYER_MENU} contextual />}
     </div>
   );
 }
 
-export const LAYER_MENU: MenuEntry[] = ['edit.copy', 'edit.paste', 'edit.duplicate', 'edit.delete', '-', 'obj.group', 'obj.ungroup', 'obj.frame', 'obj.autolayout', '-', 'obj.component', 'obj.detach', 'obj.main', '-', 'obj.front', 'obj.back', '-', 'obj.hide', 'obj.lock', '-', 'view.selection', 'file.exportPng'];
+/** Menu do botão direito numa camada (os itens que não valem para a seleção somem). */
+export const LAYER_MENU: MenuEntry[] = [
+  'edit.copy', 'edit.paste', 'edit.copyPng', 'edit.copySvg', 'edit.duplicate', 'edit.delete', '-',
+  'obj.rename', 'obj.selectParent', 'obj.selectChildren', '-',
+  'obj.front', 'obj.forward', 'obj.backward', 'obj.back', '-',
+  'obj.group', 'obj.ungroup', 'obj.frame', '-',
+  'obj.autolayout', 'obj.removeAutolayout', '-',
+  'obj.component', 'obj.variants', 'obj.addVariant', 'obj.detach', 'obj.main', '-',
+  'obj.union', 'obj.subtract', 'obj.intersect', 'obj.exclude', 'obj.flatten', 'obj.editPoints', 'obj.textOnPath', '-',
+  'obj.flipH', 'obj.flipV', '-',
+  'obj.hide', 'obj.lock', '-',
+  'view.selection', 'file.exportPng',
+];
 
 // ── Recursos: componentes e bibliotecas ─────────────────────────────────────
 
 function Assets() {
   const ed = useEditor('doc', 'ui');
   const [q, setQ] = useState('');
-  const local = ed.model.index.components();
+  // variantes aparecem pelo conjunto (um recurso só)
+  const local = [...ed.model.index.components().filter((c) => !ed.setFor(c.id)), ...ed.model.index.componentSets()];
   const match = (c: ContainerNode) => !q || c.name.toLowerCase().includes(q.toLowerCase());
   return (
     <div className="scroll">

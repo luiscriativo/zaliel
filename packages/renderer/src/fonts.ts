@@ -1,6 +1,7 @@
 // Fontes do canvas. A Inter vai embutida no app (offline); as fontes instaladas
 // no computador são lidas pela Local Font Access API do Chromium.
-import type { CanvasKit, TypefaceFontProvider } from 'canvaskit-wasm';
+import type { CanvasKit, Typeface, TypefaceFontProvider } from 'canvaskit-wasm';
+import { parse as parseFont, type Font as OutlineFont } from 'opentype.js';
 
 export interface FontFace {
   family: string;
@@ -46,12 +47,44 @@ export class FontRegistry {
   provider: TypefaceFontProvider;
   families = new Map<string, FontFamily>();
   private loaded = new Set<string>();
+  /** Faces já carregadas, para desenhar letra por letra (texto em caminho). */
+  private faces = new Map<string, Typeface>();
+  /** Bytes de cada face carregada e a mesma face aberta para ler o contorno das letras. */
+  private bytes = new Map<string, ArrayBuffer>();
+  private outlines = new Map<string, OutlineFont | null>();
   private pending = new Map<string, Promise<boolean>>();
   private listeners = new Set<() => void>();
   systemFontsError: string | null = null;
 
-  constructor(ck: CanvasKit) {
+  constructor(private ck: CanvasKit) {
     this.provider = ck.TypefaceFontProvider.Make();
+  }
+
+  /**
+   * A face aberta para ler o contorno de cada letra (converter texto em vetor).
+   * Usa o mesmo arquivo que desenha o texto, então os números dos glifos batem.
+   */
+  outlineFont(family: string, weight: number, italic: boolean): OutlineFont | null {
+    const face = this.pick(family, weight, italic);
+    if (!face) return null;
+    const k = this.key(face.family, face.weight, face.italic);
+    if (this.outlines.has(k)) return this.outlines.get(k)!;
+    const buf = this.bytes.get(k);
+    if (!buf) return null;
+    let font: OutlineFont | null = null;
+    try {
+      font = parseFont(buf);
+    } catch {
+      font = null; // formato que o leitor não entende (ex.: algumas coleções .ttc)
+    }
+    this.outlines.set(k, font);
+    return font;
+  }
+
+  /** Face carregada mais próxima do pedido (null enquanto não carregou). */
+  typeface(family: string, weight: number, italic: boolean): Typeface | null {
+    const face = this.pick(family, weight, italic);
+    return face ? (this.faces.get(this.key(face.family, face.weight, face.italic)) ?? null) : null;
   }
 
   onLoad(fn: () => void): () => void {
@@ -144,6 +177,9 @@ export class FontRegistry {
         .load()
         .then((buf) => {
           this.provider.registerFont(buf, face.family);
+          this.bytes.set(k, buf);
+          const tf = this.ck.Typeface.MakeTypefaceFromData(buf);
+          if (tf) this.faces.set(k, tf);
           this.loaded.add(k);
           for (const l of this.listeners) l();
           return true;

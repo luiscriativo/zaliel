@@ -13,10 +13,12 @@ export function hitPath(editor: Editor, p: Point, tolerance: number): string[] {
       const m = multiply(parentM, nodeMatrix(n));
       const local = apply(invert(m), p);
       const inside = local.x >= -tolerance && local.y >= -tolerance && local.x <= n.width + tolerance && local.y <= n.height + tolerance;
-      if ('children' in n && n.children.length) {
-        const clips = n.type !== 'group' && n.clip;
+      // operação booleana aparece como um caminho só, mas as formas de dentro continuam clicáveis
+      const kids = raw.type === 'boolean' ? raw.children : 'children' in n ? n.children : [];
+      if (kids.length) {
+        const clips = 'children' in n && n.type !== 'group' && n.clip;
         if (!clips || inside) {
-          const sub = visit(n.children, m);
+          const sub = visit(kids, m);
           if (sub) return [n.id, ...sub];
         }
       }
@@ -42,7 +44,7 @@ export function hitPath(editor: Editor, p: Point, tolerance: number): string[] {
 }
 
 /**
- * Escolhe o que um clique seleciona, no estilo do Figma:
+ * Escolhe o que um clique seleciona:
  * filhos diretos de frames do topo; grupos e instâncias inteiros; mantém o nível da seleção atual.
  */
 export function pickTarget(editor: Editor, p: Point, deep: boolean): string | null {
@@ -62,7 +64,7 @@ export function pickTarget(editor: Editor, p: Point, deep: boolean): string | nu
     if (i >= 0 && i + 1 < path.length) return path[i + 1];
   }
   const top = idx.get(path[0]);
-  const target = top && (top.type === 'frame' || top.type === 'component') && path.length > 1 ? path[1] : path[0];
+  const target = top && (top.type === 'frame' || top.type === 'component' || top.type === 'component-set') && path.length > 1 ? path[1] : path[0];
   // um nó já selecionado mais fundo que o alvo continua clicável (para arrastar)
   const ti = path.indexOf(target);
   for (const id of editor.selection) if (path.indexOf(id) > ti) return id;

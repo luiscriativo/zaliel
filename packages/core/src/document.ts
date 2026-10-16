@@ -46,6 +46,8 @@ const NAMES: Record<NodeType, string> = {
   path: 'Vetor',
   text: 'Texto',
   component: 'Componente',
+  'component-set': 'Variantes',
+  boolean: 'Booleana',
   instance: 'Instância',
 };
 
@@ -55,7 +57,7 @@ export function defaultName(type: NodeType): string {
 
 type Geometry = { x: number; y: number; width: number; height: number };
 
-export function createNode(type: 'frame' | 'group' | 'component', g: Geometry, extra?: Partial<ContainerNode>): ContainerNode;
+export function createNode(type: 'frame' | 'group' | 'component' | 'component-set' | 'boolean', g: Geometry, extra?: Partial<ContainerNode>): ContainerNode;
 export function createNode(type: 'rect' | 'ellipse' | 'line' | 'polygon' | 'star', g: Geometry, extra?: Partial<ShapeNode>): ShapeNode;
 export function createNode(type: 'text', g: Geometry, extra?: Partial<TextNode>): TextNode;
 export function createNode(type: 'path', g: Geometry, extra?: Partial<PathNode>): PathNode;
@@ -68,6 +70,18 @@ export function createNode(type: NodeType, g: Geometry, extra: Record<string, un
       return { ...base, type, fills: [{ type: 'solid', color: '#ffffff' }], clip: true, children: [], ...extra } as ContainerNode;
     case 'group':
       return { ...base, type, children: [], ...extra } as ContainerNode;
+    case 'component-set':
+      return {
+        ...base,
+        type,
+        fills: [],
+        strokes: [{ paint: { type: 'solid', color: '#7d5ba6' }, width: 1, align: 'inside', dash: [6, 4] }],
+        cornerRadius: 6,
+        children: [],
+        ...extra,
+      } as ContainerNode;
+    case 'boolean':
+      return { ...base, type, booleanOp: 'union', fills: [{ type: 'solid', color: '#d9d4ca' }], children: [], ...extra } as ContainerNode;
     case 'rect':
     case 'ellipse':
     case 'polygon':
@@ -117,11 +131,14 @@ export interface IndexEntry {
 
 export class DocIndex {
   map = new Map<string, IndexEntry>();
+  /** Listas de componentes e conjuntos, refeitas só quando camadas entram ou saem. */
+  private cache: { components: ContainerNode[]; sets: ContainerNode[] } | null = null;
   constructor(public doc: ZalDocument) {
     this.rebuild();
   }
 
   rebuild(): void {
+    this.cache = null;
     this.map.clear();
     for (const page of this.doc.pages) {
       this.map.set(page.id, { node: page, parent: ROOT, page: page.id });
@@ -130,6 +147,7 @@ export class DocIndex {
   }
 
   addTree(nodes: SceneNode[], parent: string, page: string): void {
+    this.cache = null;
     for (const n of nodes) {
       this.map.set(n.id, { node: n, parent, page });
       if ('children' in n) this.addTree(n.children, n.id, page);
@@ -137,6 +155,7 @@ export class DocIndex {
   }
 
   removeTree(n: SceneNode): void {
+    this.cache = null;
     this.map.delete(n.id);
     if ('children' in n) for (const c of n.children) this.removeTree(c);
   }
@@ -205,11 +224,27 @@ export class DocIndex {
     return p && this.get(p) ? this.worldMatrix(p) : IDENTITY;
   }
 
-  /** Componentes do próprio arquivo (em qualquer página). */
+  private lists() {
+    if (!this.cache) {
+      const components: ContainerNode[] = [], sets: ContainerNode[] = [];
+      for (const e of this.map.values()) {
+        if (!('type' in e.node)) continue;
+        if (e.node.type === 'component') components.push(e.node as ContainerNode);
+        else if (e.node.type === 'component-set') sets.push(e.node as ContainerNode);
+      }
+      this.cache = { components, sets };
+    }
+    return this.cache;
+  }
+
+  /** Componentes do próprio arquivo (em qualquer página), inclusive as variantes. */
   components(): ContainerNode[] {
-    const out: ContainerNode[] = [];
-    for (const e of this.map.values()) if ('type' in e.node && e.node.type === 'component') out.push(e.node as ContainerNode);
-    return out;
+    return this.lists().components;
+  }
+
+  /** Conjuntos de variantes do próprio arquivo. */
+  componentSets(): ContainerNode[] {
+    return this.lists().sets;
   }
 }
 

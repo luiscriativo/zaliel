@@ -2,7 +2,11 @@
 import { app, BrowserWindow, dialog, ipcMain, Menu, nativeTheme, session, shell, type BrowserWindowConstructorOptions } from 'electron';
 import { promises as fs, existsSync } from 'node:fs';
 import path from 'node:path';
+import os from 'node:os';
 import { Updater } from './updater';
+import { IMPORT_EXTENSIONS } from './importer';
+import createImportWorker from './import-worker?nodeWorker';
+import { startAutomation, newToken, DEFAULT_PORT, type AutomationServer, type AutomationSettings } from './automation';
 
 // Gancho de desenvolvimento: perfil separado para testes (--user-data=<pasta>)
 const userDataArg = process.argv.find((a) => a.startsWith('--user-data='));
@@ -50,7 +54,81 @@ const zalArg = (argv: string[]) => argv.slice(1).find((a) => /\.zal$/i.test(a) &
 
 // ── Configurações, recentes e recuperação ───────────────────────────────────
 
-const DEFAULT_SETTINGS = { theme: 'system', nudge: 1, bigNudge: 10, pixelGrid: true, snapping: true, welcomed: false };
+const DEFAULT_SETTINGS = { theme: 'system', nudge: 1, bigNudge: 10, pixelGrid: true, snapping: true, welcomed: false, rulers: true, layoutGrids: true, autoSave: true, author: '', automation: { enabled: false, port: DEFAULT_PORT, token: '' } as AutomationSettings };
+
+// ── Automação local (desligada até o usuário ligar nas preferências) ────────
+
+let automation: AutomationServer | null = null;
+let automationConf: AutomationSettings | null = null;
+let automationError: string | null = null;
+const automationReady = new Set<number>(); // webContents com o editor pronto para receber pedidos
+let lastFocused: number | null = null;
+let automationSeq = 0;
+const automationPending = new Map<number, { resolve: (v: unknown) => void; reject: (e: Error) => void; timer: NodeJS.Timeout }>();
+
+/** Caminho da ponte stdio (fora do .asar no app instalado, para dar para executar). */
+function bridgePath(): string {
+  return path.join(__dirname, 'ponte.js').replace(/app\.asar([\\/])/, 'app.asar.unpacked$1');
+}
+
+/** Janela que recebe os pedidos: a última focada com o editor pronto (abre uma se não houver). */
+async function automationTarget(): Promise<Electron.WebContents> {
+  const pick = () => {
+    const wins = BrowserWindow.getAllWindows().filter((w) => !w.isDestroyed() && automationReady.has(w.webContents.id));
+    return wins.find((w) => w.webContents.id === lastFocused) ?? wins[0];
+  };
+  let win = pick();
+  if (!win) {
+    if (!BrowserWindow.getAllWindows().length) createWindow();
+    for (let i = 0; i < 200 && !win; i++) {
+      await new Promise((r) => setTimeout(r, 100));
+      win = pick();
+    }
+  }
+  if (!win) throw new Error('A janela do Zaliel não ficou pronta.');
+  return win.webContents;
+}
+
+async function automationCall(payload: unknown, timeoutMs = 180000): Promise<unknown> {
+  const wc = await automationTarget();
+  const id = ++automationSeq;
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      automationPending.delete(id);
+      reject(new Error('O editor demorou demais para responder.'));
+    }, timeoutMs);
+    automationPending.set(id, { resolve, reject, timer });
+    wc.send('automation:request', { id, payload });
+  });
+}
+
+async function syncAutomation(conf: AutomationSettings | undefined): Promise<void> {
+  const next = conf ?? DEFAULT_SETTINGS.automation;
+  const same = automationConf && automationConf.enabled === next.enabled && automationConf.port === next.port && automationConf.token === next.token;
+  if (same && (automation || !next.enabled)) return;
+  automationConf = { ...next };
+  if (automation) {
+    await automation.close();
+    automation = null;
+  }
+  automationError = null;
+  if (!next.enabled || !next.token) return;
+  try {
+    automation = await startAutomation(next, {
+      version: app.getVersion(),
+      describe: () => automationCall({ kind: 'describe' }) as Promise<{ tools: unknown[]; instructions: string }>,
+      call: (name, args) => automationCall({ kind: 'call', name, args }) as Promise<{ content: unknown[]; isError?: boolean }>,
+    });
+  } catch (e) {
+    const code = (e as NodeJS.ErrnoException)?.code;
+    automationError = code === 'EADDRINUSE' ? `A porta ${next.port} já está em uso por outro programa.` : String((e as Error)?.message ?? e);
+  }
+}
+
+async function automationSettings(): Promise<AutomationSettings> {
+  const s = { ...DEFAULT_SETTINGS, ...(await readJson<Record<string, unknown>>(dataFile('settings.json'), {})) };
+  return { ...DEFAULT_SETTINGS.automation, ...((s.automation as AutomationSettings) ?? {}) };
+}
 
 interface Recent {
   path: string;
@@ -104,6 +182,7 @@ function createWindow(openPath?: string): BrowserWindow {
   state.set(win, { dirty: false, allowClose: false, path: null });
 
   win.once('ready-to-show', () => win.show());
+  win.on('focus', () => (lastFocused = win.webContents.id));
   win.on('close', (e) => {
     const s = state.get(win);
     if (s && s.dirty && !s.allowClose) {
@@ -158,7 +237,29 @@ function registerIpc() {
   const fromEvent = (e: Electron.IpcMainInvokeEvent | Electron.IpcMainEvent) => BrowserWindow.fromWebContents(e.sender)!;
   const zalFilter = [{ name: 'Documento Zaliel', extensions: ['zal'] }];
 
-  ipcMain.handle('app:info', () => ({ version: app.getVersion(), os: process.platform, dev: !app.isPackaged }));
+  ipcMain.handle('app:info', () => {
+    let user = '';
+    try {
+      user = os.userInfo().username;
+    } catch {
+      /* sem nome de usuário */
+    }
+    return { version: app.getVersion(), os: process.platform, dev: !app.isPackaged, user };
+  });
+  // fechar/trocar com alterações: salvar, não salvar ou cancelar
+  ipcMain.handle('dialog:unsaved', async (e, name: string) => {
+    const r = await dialog.showMessageBox(fromEvent(e), {
+      type: 'warning',
+      title: 'Zaliel',
+      message: `Salvar as alterações em “${name}”?`,
+      detail: 'Se não salvar, as alterações feitas desde a última gravação serão perdidas.',
+      buttons: ['Salvar', 'Não salvar', 'Cancelar'],
+      defaultId: 0,
+      cancelId: 2,
+      noLink: true,
+    });
+    return (['save', 'discard', 'cancel'] as const)[r.response] ?? 'cancel';
+  });
   ipcMain.handle('app:pending-open', (e) => {
     const p = pendingFor.get(e.sender.id) ?? pendingOpen.shift() ?? null;
     pendingFor.delete(e.sender.id);
@@ -187,11 +288,44 @@ function registerIpc() {
     return target;
   });
   ipcMain.handle('file:export', async (e, { data, name, kind }: { data: Uint8Array | string; name: string; kind: string }) => {
-    const labels: Record<string, string> = { png: 'Imagem PNG', jpg: 'Imagem JPG', webp: 'Imagem WebP', svg: 'Vetor SVG' };
+    const labels: Record<string, string> = { png: 'Imagem PNG', jpg: 'Imagem JPG', webp: 'Imagem WebP', svg: 'Vetor SVG', pdf: 'Documento PDF' };
     const r = await dialog.showSaveDialog(fromEvent(e), { title: 'Exportar', defaultPath: path.join(app.getPath('downloads'), name.replace(/[\\/:*?"<>|]/g, '-')), filters: [{ name: labels[kind] ?? kind, extensions: [kind] }] });
     if (r.canceled || !r.filePath) return null;
     await writeAtomic(r.filePath, typeof data === 'string' ? data : Buffer.from(data));
     return r.filePath;
+  });
+  // exportação em lote: escolhe a pasta e grava todos os arquivos (nomes podem ter subpastas)
+  ipcMain.handle('file:export-batch', async (e, files: { name: string; data: Uint8Array | string }[]) => {
+    const r = await dialog.showOpenDialog(fromEvent(e), { title: 'Escolher pasta para exportar', defaultPath: app.getPath('downloads'), properties: ['openDirectory', 'createDirectory'] });
+    if (r.canceled || !r.filePaths[0]) return null;
+    const root = r.filePaths[0];
+    let count = 0;
+    for (const f of files) {
+      const parts = f.name.split('/').map((s) => s.replace(/[\\:*?"<>|]/g, '-').replace(/^\.+/, '_').trim() || '_');
+      const target = path.join(root, ...parts);
+      if (!target.startsWith(root)) continue;
+      await fs.mkdir(path.dirname(target), { recursive: true });
+      await writeAtomic(target, typeof f.data === 'string' ? f.data : Buffer.from(f.data));
+      count++;
+    }
+    return { folder: root, count };
+  });
+  ipcMain.handle('file:import', async (e, file?: string) => {
+    let target = file ?? null;
+    if (!target) {
+      const r = await dialog.showOpenDialog(fromEvent(e), { title: 'Importar arquivo', filters: [{ name: 'Arquivos de design', extensions: IMPORT_EXTENSIONS }], properties: ['openFile'] });
+      if (r.canceled || !r.filePaths[0]) return null;
+      target = r.filePaths[0];
+    }
+    // leitura e conversão numa thread separada: arquivos grandes não travam o aplicativo
+    return new Promise((resolve) => {
+      const worker = createImportWorker({ workerData: { file: target } });
+      worker.once('message', (res) => {
+        resolve(res);
+        void worker.terminate();
+      });
+      worker.once('error', (err) => resolve({ ok: false, error: String(err?.message ?? err) }));
+    });
   });
   ipcMain.handle('file:pick-images', async (e) => {
     const r = await dialog.showOpenDialog(fromEvent(e), { title: 'Importar imagens', filters: [{ name: 'Imagens', extensions: ['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'svg'] }], properties: ['openFile', 'multiSelections'] });
@@ -210,10 +344,48 @@ function registerIpc() {
 
   ipcMain.handle('settings:get', async () => ({ ...DEFAULT_SETTINGS, ...(await readJson(dataFile('settings.json'), {})) }));
   ipcMain.handle('settings:set', async (_e, patch: Record<string, unknown>) => {
-    const next = { ...DEFAULT_SETTINGS, ...(await readJson(dataFile('settings.json'), {})), ...patch };
+    const next = { ...DEFAULT_SETTINGS, ...(await readJson(dataFile('settings.json'), {})), ...patch } as typeof DEFAULT_SETTINGS;
+    // ligar a automação pela primeira vez cria o token
+    if (next.automation?.enabled && !next.automation.token) next.automation = { ...next.automation, token: newToken() };
     await writeAtomic(dataFile('settings.json'), JSON.stringify(next, null, 2));
     if (patch.theme) nativeTheme.themeSource = patch.theme as 'system' | 'light' | 'dark';
+    if (patch.automation) await syncAutomation(next.automation);
     return next;
+  });
+
+  // automação: estado do servidor, novo token e a conversa com o editor
+  ipcMain.handle('automation:info', async () => {
+    const conf = await automationSettings();
+    return { ...conf, running: !!automation, error: automationError, exe: process.execPath, bridge: bridgePath() };
+  });
+  ipcMain.handle('automation:regenerate', async () => {
+    const s = { ...DEFAULT_SETTINGS, ...(await readJson(dataFile('settings.json'), {})) } as typeof DEFAULT_SETTINGS;
+    s.automation = { ...DEFAULT_SETTINGS.automation, ...s.automation, token: newToken() };
+    await writeAtomic(dataFile('settings.json'), JSON.stringify(s, null, 2));
+    await syncAutomation(s.automation);
+    return s;
+  });
+  // arquivos pedidos pela automação (imagens para inserir, exportações)
+  ipcMain.handle('automation:read-binary', async (_e, p: string) => {
+    if (!automation) throw new Error('automação desligada');
+    return (await fs.readFile(p)).toString('base64');
+  });
+  ipcMain.handle('automation:write-file', async (_e, p: string, data: string, base64: boolean) => {
+    if (!automation) throw new Error('automação desligada');
+    await fs.mkdir(path.dirname(p), { recursive: true });
+    await writeAtomic(p, base64 ? Buffer.from(data, 'base64') : data);
+  });
+  ipcMain.on('automation:ready', (e) => {
+    automationReady.add(e.sender.id);
+    e.sender.once('destroyed', () => automationReady.delete(e.sender.id));
+  });
+  ipcMain.on('automation:response', (_e, msg: { id: number; result?: unknown; error?: string }) => {
+    const p = automationPending.get(msg.id);
+    if (!p) return;
+    automationPending.delete(msg.id);
+    clearTimeout(p.timer);
+    if (msg.error) p.reject(new Error(msg.error));
+    else p.resolve(msg.result);
   });
 
   ipcMain.handle('recovery:write', async (_e, entry: { id: string; name: string; path: string | null; savedAt: number }, text: string) => {
@@ -331,6 +503,7 @@ if (!app.requestSingleInstanceLock()) {
 
     const first = zalArg(process.argv) ?? pendingOpen.shift();
     createWindow(first);
+    void syncAutomation(await automationSettings());
     app.on('activate', () => {
       if (BrowserWindow.getAllWindows().length === 0) createWindow();
     });

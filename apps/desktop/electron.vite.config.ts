@@ -12,6 +12,11 @@ export default defineConfig({
   main: {
     plugins: [externalizeDepsPlugin({ include: ['electron-updater'] })],
     resolve: { alias },
+    build: {
+      rollupOptions: {
+        input: { index: resolve(__dirname, 'src/main/index.ts'), ponte: resolve(__dirname, 'src/main/ponte.ts') },
+      },
+    },
   },
   preload: {
     plugins: [externalizeDepsPlugin()],
@@ -21,6 +26,9 @@ export default defineConfig({
     resolve: { alias },
     plugins: [react()],
     build: {
+      // Não apaga os chunks da build anterior: uma janela aberta ainda carrega os pedaços
+      // sob demanda (ícones, importação) pelos nomes antigos. O `dist` limpa `out/` antes.
+      emptyOutDir: false,
       rollupOptions: { input: resolve(__dirname, 'src/renderer/index.html') },
     },
   },

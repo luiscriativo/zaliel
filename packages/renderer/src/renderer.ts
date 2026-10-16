@@ -1,5 +1,5 @@
 // Desenho da cena com CanvasKit (Skia). Usado pelo canvas do editor e pela exportação PNG.
-import type { CanvasKit, Canvas, Paint as SkPaint, Path as SkPath, Image as SkImage, Paragraph, Surface, Shader, BlendMode as SkBlend, EmbindEnumEntity } from 'canvaskit-wasm';
+import type { CanvasKit, Canvas, Paint as SkPaint, Path as SkPath, Image as SkImage, Paragraph, Surface, Shader, BlendMode as SkBlend, EmbindEnumEntity, Typeface } from 'canvaskit-wasm';
 import {
   type BlendMode,
   type Paint,
@@ -10,12 +10,14 @@ import {
   type Page,
   type Mat,
   nodeMatrix,
+  multiply,
+  transformRect,
+  IDENTITY,
   parseHex,
-  polygonPath,
-  radii,
   resolvePaint,
 } from '@zaliel/core';
 import type { FontRegistry } from './fonts';
+import { booleanPath, localShapePath, toSkMatrix } from './geometry';
 
 export interface Viewport {
   zoom: number;
@@ -57,14 +59,10 @@ const BLEND: Record<BlendMode, keyof CanvasKit['BlendMode']> = {
   luminosity: 'Luminosity',
 };
 
-export function toSkMatrix(m: Mat): number[] {
-  return [m[0], m[2], m[4], m[1], m[3], m[5], 0, 0, 1];
-}
-
 /** Desenhar texto: a mesma função mede (para o layout) e pinta. */
 export class TextEngine {
   private cache = new Map<string, Paragraph>();
-  constructor(private ck: CanvasKit, private fonts: FontRegistry) {}
+  constructor(private ck: CanvasKit, readonly fonts: FontRegistry) {}
 
   private weightEnum(w: number): EmbindEnumEntity {
     const W = this.ck.FontWeight;
@@ -75,7 +73,7 @@ export class TextEngine {
     return table.reduce((best, cur) => (Math.abs(cur[0] - w) < Math.abs(best[0] - w) ? cur : best))[1];
   }
 
-  private transformCase(t: string, c?: string): string {
+  transformCase(t: string, c?: string): string {
     if (c === 'upper') return t.toUpperCase();
     if (c === 'lower') return t.toLowerCase();
     if (c === 'title') return t.replace(/\b\p{L}/gu, (m) => m.toUpperCase());
@@ -83,13 +81,13 @@ export class TextEngine {
   }
 
   /** Parágrafo pronto para uma largura (Infinity = sem quebra). Fica em cache. */
-  paragraph(n: TextNode, width: number, paint?: SkPaint): Paragraph {
+  paragraph(n: TextNode, width: number, paint?: SkPaint, paintKey?: unknown): Paragraph {
     const ck = this.ck;
     const st = n.style;
     const family = this.fonts.has(st.family) ? st.family : 'Inter';
     this.fonts.ensure(family, st.weight, !!st.italic);
     const ready = this.fonts.isReady(family, st.weight, !!st.italic);
-    const key = JSON.stringify([n.text, st, width, ready, paint ? [n.fills, n.width, n.height] : null]);
+    const key = JSON.stringify([n.text, st, width, ready, paint ? [paintKey ?? n.fills, n.width, n.height] : null]);
     const hit = this.cache.get(key);
     if (hit) {
       this.cache.delete(key);
@@ -122,7 +120,7 @@ export class TextEngine {
     p.layout(width === Infinity ? 1e6 : Math.max(1, width));
     if (width === Infinity) p.layout(Math.ceil(p.getMaxIntrinsicWidth()) + 1);
     this.cache.set(key, p);
-    if (this.cache.size > 800) {
+    if (this.cache.size > 3000) {
       const [oldKey, old] = this.cache.entries().next().value as [string, Paragraph];
       this.cache.delete(oldKey);
       old.delete();
@@ -150,6 +148,12 @@ export class Renderer {
   private doc!: ZalDocument;
   private resolve!: (n: SceneNode) => SceneNode;
   private hidden?: Set<string>;
+  /** Matriz do pai atual no espaço da página (para saber onde cada nó cai na tela). */
+  private mat: Mat = IDENTITY;
+  /** Área visível no espaço da página (null = desenha tudo, como nas exportações). */
+  private cull: { x0: number; y0: number; x1: number; y1: number } | null = null;
+  /** Pixels de tela por unidade (Infinity nas exportações: sem simplificações). */
+  private lod = Infinity;
   /** Modo escolhido por coleção de variáveis (ex.: claro/escuro). */
   modes: Record<string, string> = {};
 
@@ -158,6 +162,8 @@ export class Renderer {
   }
 
   attach(canvas: HTMLCanvasElement): boolean {
+    // as imagens guardadas pertencem ao contexto antigo
+    this.invalidate();
     this.surface?.delete();
     this.surface = this.ck.MakeWebGLCanvasSurface(canvas) ?? this.ck.MakeSWCanvasSurface(canvas);
     return !!this.surface;
@@ -210,7 +216,18 @@ export class Renderer {
     canvas.scale(o.dpr, o.dpr);
     canvas.translate(o.viewport.x, o.viewport.y);
     canvas.scale(o.viewport.zoom, o.viewport.zoom);
-    for (const n of o.page.children) this.drawNode(canvas, n);
+    // só o que cai na tela é desenhado (com folga para sombras e contornos)
+    const z = o.viewport.zoom;
+    const w = surface.width() / o.dpr, h = surface.height() / o.dpr;
+    this.cull = { x0: -o.viewport.x / z, y0: -o.viewport.y / z, x1: (w - o.viewport.x) / z, y1: (h - o.viewport.y) / z };
+    this.lod = z;
+    this.mat = IDENTITY;
+    this.dpr = o.dpr;
+    for (const n of o.page.children) {
+      if (!this.drawCached(canvas, n)) this.drawNode(canvas, n);
+    }
+    this.cull = null;
+    this.lod = Infinity;
     canvas.restore();
     if (o.overlay) {
       canvas.save();
@@ -222,64 +239,132 @@ export class Renderer {
     this.flushTrash();
   }
 
-  /** Exporta um nó como PNG/JPG/WebP numa escala. */
-  exportImage(doc: ZalDocument, node: SceneNode, resolve: (n: SceneNode) => SceneNode, scale = 1, format: 'png' | 'jpg' | 'webp' = 'png', background?: string): Uint8Array | null {
+  // ── Cache de telas pequenas ────────────────────────────────────────────────
+  // Com pouco zoom, cada camada do topo vira uma imagem guardada e reaproveitada
+  // até algo dentro dela mudar (veja `invalidate`).
+
+  private dpr = 1;
+  private shots = new Map<string, { image: SkImage; scale: number; w: number; h: number }>();
+
+  /** Algo mudou dentro destas camadas do topo (ou em todas, sem ids). */
+  invalidate(ids?: Iterable<string>): void {
+    if (!ids) {
+      for (const s of this.shots.values()) s.image.delete();
+      this.shots.clear();
+      return;
+    }
+    for (const id of ids) {
+      const s = this.shots.get(id);
+      if (s) {
+        s.image.delete();
+        this.shots.delete(id);
+      }
+    }
+  }
+
+  /**
+   * Superfície fora da tela: na GPU (mesmo contexto do canvas) quando der, que é muitas vezes
+   * mais rápida para sombras e desfoques; senão, na CPU. `release` libera tudo (na CPU,
+   * dispose também solta os pixels — só delete deixaria a memória presa).
+   */
+  private offscreen(w: number, h: number): { surface: Surface; release: () => void } | null {
+    const ck = this.ck;
+    if (this.surface && w <= 8192 && h <= 8192) {
+      try {
+        const gpu = this.surface.makeSurface({ width: w, height: h, colorType: ck.ColorType.RGBA_8888, alphaType: ck.AlphaType.Premul, colorSpace: ck.ColorSpace.SRGB });
+        if (gpu) return { surface: gpu, release: () => gpu.delete() };
+      } catch {
+        /* sem GPU: usa a CPU */
+      }
+    }
+    const cpu = ck.MakeSurface(w, h);
+    return cpu ? { surface: cpu, release: () => cpu.dispose() } : null;
+  }
+
+  /** Desenha uma camada do topo pela imagem guardada, quando ela aparece pequena. Devolve false para o desenho normal. */
+  private drawCached(canvas: Canvas, raw: SceneNode): boolean {
+    const px = Math.max(raw.width, raw.height) * this.lod;
+    if (this.lod >= 0.5 || px > 420 || px < 2 || raw.rotation || raw.visible === false || raw.effects?.length || this.hidden?.size) return false;
+    if (!('children' in raw) || raw.type === 'group') return false;
+    if (this.invisible(raw, nodeMatrix(raw))) return true;
+    // escala em degraus (potências de 2) para reaproveitar a mesma imagem em vários zooms
+    const scale = Math.pow(2, Math.ceil(Math.log2(this.lod * this.dpr)));
+    let shot = this.shots.get(raw.id);
+    if (shot && (shot.scale !== scale || shot.w !== raw.width || shot.h !== raw.height)) {
+      shot.image.delete();
+      this.shots.delete(raw.id);
+      shot = undefined;
+    }
+    if (!shot) {
+      const w = Math.max(1, Math.ceil(raw.width * scale)), h = Math.max(1, Math.ceil(raw.height * scale));
+      const off = this.offscreen(w, h);
+      if (!off) return false;
+      const surface = off.surface;
+      const c = surface.getCanvas();
+      c.save();
+      c.clear(this.ck.TRANSPARENT);
+      const saved = { cull: this.cull, lod: this.lod, mat: this.mat };
+      this.cull = null;
+      this.lod = scale / this.dpr;
+      this.mat = IDENTITY;
+      c.scale(scale, scale);
+      this.drawNode(c, { ...raw, x: 0, y: 0 } as SceneNode);
+      Object.assign(this, saved);
+      c.restore();
+      const image = surface.makeImageSnapshot();
+      off.release();
+      shot = { image, scale, w: raw.width, h: raw.height };
+      this.shots.set(raw.id, shot);
+    }
+    const paint = this.t(new this.ck.Paint());
+    canvas.drawImageRectOptions(shot.image, this.ck.XYWHRect(0, 0, shot.image.width(), shot.image.height()), this.ck.XYWHRect(raw.x, raw.y, shot.image.width() / scale, shot.image.height() / scale), this.ck.FilterMode.Linear, this.ck.MipmapMode.None, paint);
+    return true;
+  }
+
+  /** Desenha um nó sozinho numa superfície fora da tela. */
+  private snapshot<T>(doc: ZalDocument, node: SceneNode, resolve: (n: SceneNode) => SceneNode, scale: number, clear: Float32Array, read: (img: SkImage, w: number, h: number) => T): T | null {
     const w = Math.max(1, Math.ceil(node.width * scale));
     const h = Math.max(1, Math.ceil(node.height * scale));
-    const surface = this.ck.MakeSurface(w, h);
-    if (!surface) return null;
+    const off = this.offscreen(w, h);
+    if (!off) return null;
+    const surface = off.surface;
     this.doc = doc;
     this.resolve = resolve;
     this.hidden = undefined;
     this.modes = doc.settings?.modes ?? {};
     const canvas = surface.getCanvas();
-    canvas.clear(background ? this.color(background) : format === 'jpg' ? this.ck.WHITE : this.ck.TRANSPARENT);
+    canvas.clear(clear);
     canvas.scale(scale, scale);
     this.drawNode(canvas, { ...node, x: 0, y: 0, rotation: 0 } as SceneNode);
     const img = surface.makeImageSnapshot();
-    const fmt = format === 'jpg' ? this.ck.ImageFormat.JPEG : format === 'webp' ? this.ck.ImageFormat.WEBP : this.ck.ImageFormat.PNG;
-    const bytes = img.encodeToBytes(fmt, 92);
+    const out = read(img, w, h);
     img.delete();
-    surface.delete();
+    off.release();
     this.flushTrash();
-    return bytes;
+    return out;
+  }
+
+  /** Exporta um nó como PNG/JPG/WebP numa escala. */
+  exportImage(doc: ZalDocument, node: SceneNode, resolve: (n: SceneNode) => SceneNode, scale = 1, format: 'png' | 'jpg' | 'webp' = 'png', background?: string): Uint8Array | null {
+    const clear = background ? this.color(background) : format === 'jpg' ? this.ck.WHITE : this.ck.TRANSPARENT;
+    const fmt = format === 'jpg' ? this.ck.ImageFormat.JPEG : format === 'webp' ? this.ck.ImageFormat.WEBP : this.ck.ImageFormat.PNG;
+    return this.snapshot(doc, node, resolve, scale, clear, (img) => img.encodeToBytes(fmt, 92));
+  }
+
+  /** Pixels RGBA (sem pré-multiplicar) de um nó — usados pela exportação em PDF. */
+  exportPixels(doc: ZalDocument, node: SceneNode, resolve: (n: SceneNode) => SceneNode, scale = 1): { width: number; height: number; rgba: Uint8Array } | null {
+    const ck = this.ck;
+    return this.snapshot(doc, node, resolve, scale, ck.TRANSPARENT, (img, width, height) => {
+      const px = img.readPixels(0, 0, { width, height, colorType: ck.ColorType.RGBA_8888, alphaType: ck.AlphaType.Unpremul, colorSpace: ck.ColorSpace.SRGB });
+      return px ? { width, height, rgba: new Uint8Array(px.buffer, px.byteOffset, px.byteLength) } : null;
+    });
   }
 
   // ── Geometria ──────────────────────────────────────────────────────────────
 
   shapePath(n: SceneNode): SkPath | null {
-    const ck = this.ck;
-    const w = n.width, h = n.height;
-    switch (n.type) {
-      case 'ellipse': {
-        const b = new ck.PathBuilder();
-        b.addOval(ck.LTRBRect(0, 0, w, h));
-        return this.t(b.detachAndDelete());
-      }
-      case 'line': {
-        const b = new ck.PathBuilder();
-        b.moveTo(0, 0).lineTo(w, h);
-        return this.t(b.detachAndDelete());
-      }
-      case 'polygon':
-      case 'star':
-        return this.t(ck.Path.MakeFromSVGString(polygonPath(n, w, h))!);
-      case 'path': {
-        const p = n.d ? ck.Path.MakeFromSVGString(n.d) : null;
-        if (!p) return null;
-        if (n.fillRule === 'evenodd') p.setFillType(ck.FillType.EvenOdd);
-        return this.t(p);
-      }
-      case 'text':
-        return null;
-      default: {
-        const [tl, tr, br, bl] = radii(n);
-        const b = new ck.PathBuilder();
-        if (tl || tr || br || bl) b.addRRect(Float32Array.of(0, 0, w, h, tl, tl, tr, tr, br, br, bl, bl));
-        else b.addRect(ck.LTRBRect(0, 0, w, h));
-        return this.t(b.detachAndDelete());
-      }
-    }
+    const p = n.type === 'boolean' ? booleanPath(this.ck, n, this.resolve) : localShapePath(this.ck, n);
+    return p ? this.t(p) : null;
   }
 
   private shader(p: Paint, w: number, h: number): Shader | null {
@@ -342,9 +427,38 @@ export class Renderer {
 
   // ── Desenho ────────────────────────────────────────────────────────────────
 
+  /** O nó (e o que ele contém) pode ser pulado: fora da tela ou pequeno demais para enxergar. */
+  private invisible(n: SceneNode, m: Mat): boolean {
+    if (!this.cull) return false;
+    const b = transformRect(m, { x: 0, y: 0, width: n.width, height: n.height });
+    const tiny = b.width * this.lod < 0.5 && b.height * this.lod < 0.5;
+    if (tiny && !(n.effects?.length || n.strokes?.length)) return true;
+    // container sem recorte pode ter filhos fora da caixa: só some se for grupo (a caixa envolve os filhos)
+    if ('children' in n && n.children.length && n.type !== 'group' && n.type !== 'boolean' && !n.clip) return false;
+    let pad = 2 / this.lod;
+    for (const s of n.strokes ?? []) pad = Math.max(pad, s.width);
+    for (const e of n.effects ?? []) pad = Math.max(pad, 'blur' in e ? e.blur * 1.5 + Math.abs(e.x) + Math.abs(e.y) + (e.spread ?? 0) : e.radius * 1.5);
+    const c = this.cull;
+    return b.x + b.width + pad < c.x0 || b.y + b.height + pad < c.y0 || b.x - pad > c.x1 || b.y - pad > c.y1;
+  }
+
   drawNode(canvas: Canvas, raw: SceneNode): void {
     if (raw.visible === false || this.hidden?.has(raw.id)) return;
+    const parentMat = this.mat;
+    // a caixa é a mesma antes e depois de resolver: confere a visibilidade primeiro
+    // (resolver instâncias e booleanas custa caro e é inútil fora da tela)
+    const m = multiply(parentMat, nodeMatrix(raw));
+    if (this.invisible(raw, m)) return;
     const n = this.resolve(raw);
+    this.mat = m;
+    try {
+      this.drawNodeAt(canvas, n);
+    } finally {
+      this.mat = parentMat;
+    }
+  }
+
+  private drawNodeAt(canvas: Canvas, n: SceneNode): void {
     const ck = this.ck;
     canvas.save();
     canvas.concat(toSkMatrix(nodeMatrix(n)));
@@ -428,7 +542,7 @@ export class Renderer {
       canvas.restore();
     }
 
-    if ('children' in n && n.children.length) {
+    if ('children' in n && n.children.length && n.type !== 'boolean') {
       const clip = n.type !== 'group' && n.clip && path;
       if (clip) {
         canvas.save();
@@ -464,13 +578,168 @@ export class Renderer {
     canvas.restore();
   }
 
+  /**
+   * Onde vai cada letra de um texto em caminho: id do glifo e a transformação (RSXform:
+   * cosseno, seno, x, y) de cada uma. Usado para desenhar e para converter em vetor.
+   */
+  private textPathLayout(n: TextNode): { tf: Typeface; size: number; ids: number[]; xf: number[] } | null {
+    const ck = this.ck;
+    const st = n.style;
+    const family = this.text.fonts.has(st.family) ? st.family : 'Inter';
+    this.text.fonts.ensure(family, st.weight, !!st.italic);
+    const tf = this.text.fonts.typeface(family, st.weight, !!st.italic) ?? this.text.fonts.typeface('Inter', st.weight, !!st.italic);
+    const path = n.textPath ? ck.Path.MakeFromSVGString(n.textPath.d) : null;
+    if (!tf || !path) {
+      path?.delete();
+      return null;
+    }
+    const font = new ck.Font(tf, st.size);
+    const iter = new ck.ContourMeasureIter(path, false, 1);
+    const cm = iter.next();
+    try {
+      const xf: number[] = [];
+      const ids: number[] = [];
+      if (!cm) return { tf, size: st.size, ids, xf };
+      const text = this.text.transformCase(n.text || '', st.case);
+      const glyphs = font.getGlyphIDs(text);
+      const widths = font.getGlyphWidths(glyphs);
+      const ls = st.letterSpacing ?? 0;
+      const total = widths.reduce((a, w) => a + w, 0) + ls * Math.max(0, glyphs.length - 1);
+      const len = cm.length();
+      const align = st.align ?? 'left';
+      let dist = ((n.textPath!.start ?? 0) / 100) * len + (align === 'center' ? (len - total) / 2 : align === 'right' ? len - total : 0);
+      // do outro lado: a letra fica embaixo da linha e o caminho é lido ao contrário
+      const flip = !!n.textPath!.flip;
+      const shift = flip ? -font.getMetrics().ascent * 0.8 : 0;
+      for (let i = 0; i < glyphs.length; i++) {
+        const w = widths[i];
+        const mid = flip ? len - (dist + w / 2) : dist + w / 2;
+        dist += w + ls;
+        if (mid < 0 || mid > len) continue;
+        const [px, py, tx0, ty0] = cm.getPosTan(mid);
+        const tx = flip ? -tx0 : tx0, ty = flip ? -ty0 : ty0;
+        // normal (para fora da curva) para deslocar a linha de base quando invertido
+        const nx = -ty, ny = tx;
+        xf.push(tx, ty, px - tx * (w / 2) - nx * shift, py - ty * (w / 2) - ny * shift);
+        ids.push(glyphs[i]);
+      }
+      return { tf, size: st.size, ids, xf };
+    } finally {
+      cm?.delete();
+      iter.delete();
+      font.delete();
+      path.delete();
+    }
+  }
+
+  /** Texto que segue um caminho: cada letra é colocada e girada sobre a curva. */
+  private drawTextOnPath(canvas: Canvas, n: TextNode, paint: SkPaint): boolean {
+    const lay = this.textPathLayout(n);
+    if (!lay) return false;
+    if (!lay.ids.length) return true;
+    const font = new this.ck.Font(lay.tf, lay.size);
+    const blob = this.ck.TextBlob.MakeFromRSXformGlyphs(lay.ids, lay.xf, font);
+    if (blob) {
+      canvas.drawTextBlob(blob, 0, 0, paint);
+      blob.delete();
+    }
+    font.delete();
+    return true;
+  }
+
+  /**
+   * Contorno das letras de um texto, como caminho SVG no espaço do próprio texto
+   * (o mesmo lugar onde elas aparecem no canvas). null = a fonte ainda não carregou.
+   */
+  textOutline(n: TextNode): string | null {
+    const st = n.style;
+    const family = this.text.fonts.has(st.family) ? st.family : 'Inter';
+    const font = this.text.fonts.outlineFont(family, st.weight, !!st.italic) ?? this.text.fonts.outlineFont('Inter', st.weight, !!st.italic);
+    if (!font) return null;
+    const parts: string[] = [];
+    const r = (v: number) => Math.round(v * 100) / 100;
+    // glifo na origem (linha de base em y = 0) levado pela matriz [a, b, c, d, e, f]
+    const glyph = (id: number, size: number, m: number[]) => {
+      if (id >= font.numGlyphs) return;
+      const path = font.glyphs.get(id).getPath(0, 0, size);
+      const pt = (x: number, y: number) => `${r(m[0] * x + m[2] * y + m[4])} ${r(m[1] * x + m[3] * y + m[5])}`;
+      for (const c of path.commands) {
+        if (c.type === 'M') parts.push(`M${pt(c.x, c.y)}`);
+        else if (c.type === 'L') parts.push(`L${pt(c.x, c.y)}`);
+        else if (c.type === 'Q') parts.push(`Q${pt(c.x1, c.y1)} ${pt(c.x, c.y)}`);
+        else if (c.type === 'C') parts.push(`C${pt(c.x1, c.y1)} ${pt(c.x2, c.y2)} ${pt(c.x, c.y)}`);
+        else if (c.type === 'Z') parts.push('Z');
+      }
+    };
+    const rect = (x: number, y: number, w: number, h: number) => parts.push(`M${r(x)} ${r(y)}L${r(x + w)} ${r(y)}L${r(x + w)} ${r(y + h)}L${r(x)} ${r(y + h)}Z`);
+
+    if (n.textPath) {
+      const lay = this.textPathLayout(n);
+      if (!lay) return null;
+      for (let i = 0; i < lay.ids.length; i++) {
+        const [cos, sin, x, y] = lay.xf.slice(i * 4, i * 4 + 4);
+        glyph(lay.ids[i], lay.size, [cos, sin, -sin, cos, x, y]);
+      }
+      return parts.join('');
+    }
+
+    const width = n.autoResize === 'width' ? Infinity : n.width;
+    const p = this.text.paragraph(n, width);
+    let oy = 0;
+    if (n.autoResize === 'none') {
+      const h = p.getHeight();
+      if (st.verticalAlign === 'middle') oy = (n.height - h) / 2;
+      else if (st.verticalAlign === 'bottom') oy = n.height - h;
+    }
+    const scale = st.size / font.unitsPerEm;
+    const post = font.tables.post as { underlinePosition?: number; underlineThickness?: number } | undefined;
+    const os2 = font.tables.os2 as { yStrikeoutPosition?: number; yStrikeoutSize?: number } | undefined;
+    for (const line of p.getShapedLines()) {
+      let x0 = Infinity, x1 = -Infinity;
+      for (const run of line.runs) {
+        for (let i = 0; i < run.glyphs.length; i++) {
+          const x = run.positions[i * 2], y = run.positions[i * 2 + 1] + oy;
+          glyph(run.glyphs[i], run.size, [1, 0, 0, 1, x, y]);
+        }
+        x0 = Math.min(x0, run.positions[0]);
+        x1 = Math.max(x1, run.positions[run.glyphs.length * 2]);
+      }
+      // sublinhado e tachado também viram forma
+      if (x1 > x0 && st.decoration === 'underline') {
+        const t = (post?.underlineThickness || font.unitsPerEm * 0.07) * scale;
+        rect(x0, line.baseline + oy - (post?.underlinePosition ?? -font.unitsPerEm * 0.1) * scale - t / 2, x1 - x0, t);
+      } else if (x1 > x0 && st.decoration === 'strikethrough') {
+        const t = (os2?.yStrikeoutSize || font.unitsPerEm * 0.06) * scale;
+        rect(x0, line.baseline + oy - (os2?.yStrikeoutPosition ?? font.unitsPerEm * 0.3) * scale - t / 2, x1 - x0, t);
+      }
+    }
+    return parts.join('');
+  }
+
   private drawText(canvas: Canvas, n: TextNode): void {
     const fill = (n.fills ?? []).find((f) => f.visible !== false);
     if (!fill) return;
+    if (n.textPath) {
+      const paint = this.skPaint(fill, n.width, n.height);
+      if (paint && this.drawTextOnPath(canvas, n, paint)) return;
+    }
+    // letra pequena demais para ler no zoom atual: barras no lugar das linhas (bem mais rápido)
+    if (n.style.size * this.lod < 3) {
+      const c = fill.type === 'solid' ? resolvePaint(this.doc, fill, this.modes) : fill;
+      const color = c.type === 'solid' ? c.color : '#888888';
+      const p = this.t(new this.ck.Paint());
+      p.setColor(this.color(color, 0.32 * (c.opacity ?? 1)));
+      const lh = typeof n.style.lineHeight === 'number' ? n.style.lineHeight : n.style.size * 1.25;
+      const lines = Math.max(1, Math.round(n.height / lh));
+      const w = n.autoResize === 'width' ? n.width : n.width * 0.92;
+      for (let i = 0; i < lines; i++) canvas.drawRect(this.ck.XYWHRect(0, i * lh + lh * 0.3, i === lines - 1 && lines > 1 ? w * 0.6 : w, lh * 0.45), p);
+      return;
+    }
     const paint = this.skPaint(fill, n.width, n.height);
     if (!paint) return;
     const width = n.autoResize === 'width' ? Infinity : n.width;
-    const p = this.text.paragraph(n, width, paint);
+    // a chave leva a cor já resolvida: trocar de modo (claro/escuro) muda a cor sem mudar o nó
+    const p = this.text.paragraph(n, width, paint, resolvePaint(this.doc, fill, this.modes));
     let y = 0;
     const h = p.getHeight();
     if (n.autoResize === 'none') {

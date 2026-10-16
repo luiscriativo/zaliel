@@ -13,8 +13,9 @@
     "build": "electron-vite build",
     "preview": "electron-vite preview",
     "icons": "node scripts/make-icons.mjs",
-    "dist": "electron-vite build && electron-builder --publish never",
-    "dist:win": "electron-vite build && electron-builder --win --x64 --publish never"
+    "clean": "node -e \"require('fs').rmSync('out', { recursive: true, force: true })\"",
+    "dist": "npm run clean && electron-vite build && electron-builder --publish never",
+    "dist:win": "npm run clean && electron-vite build && electron-builder --win --x64 --publish never"
   },
   "dependencies": {
     "electron-updater": "^6.8.9"

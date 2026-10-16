@@ -11,6 +11,8 @@ import {
   clone,
   createNode,
   boundsOf,
+  scalePath,
+  gridSnapEdges,
   type ContainerNode,
   type Mat,
   type Op,
@@ -21,6 +23,10 @@ import {
 } from '@zaliel/core';
 import type { Editor, Tool } from '../editor';
 import { marqueeSelect, pickInside, pickTarget, hitPath } from './hit';
+import { VectorTool } from './vector';
+
+/** Largura das réguas, em px de tela. */
+export const RULER = 20;
 
 export type Handle = 'nw' | 'n' | 'ne' | 'e' | 'se' | 's' | 'sw' | 'w';
 const HANDLE_DIR: Record<Handle, [number, number]> = {
@@ -48,7 +54,9 @@ type Drag =
   | { kind: 'resize'; handle: Handle; start: Point; items: ResizeItem[]; box: Rect; single: boolean }
   | { kind: 'rotate'; id: string; center: Point; startAngle: number; rot0: number }
   | { kind: 'create'; tool: Tool; start: Point }
-  | { kind: 'pen-handle'; index: number };
+  | { kind: 'pen-handle'; index: number }
+  | { kind: 'guide'; axis: 'x' | 'y'; index: number | null; at: number }
+  | { kind: 'vector' };
 
 interface MoveItem {
   id: string;
@@ -80,9 +88,11 @@ export class Interaction {
   dropTarget: string | null = null;
   pen: PenPoint[] = [];
   space = false;
+  vector: VectorTool;
   private downAt: Point = { x: 0, y: 0 };
 
   constructor(private editor: Editor, private el: HTMLElement, private onTextEdit: (id: string) => void) {
+    this.vector = new VectorTool(editor);
     el.addEventListener('pointerdown', this.onDown);
     el.addEventListener('pointermove', this.onMove);
     el.addEventListener('pointerup', this.onUp);
@@ -145,7 +155,7 @@ export class Interaction {
   }
 
   private handleAt(p: Point): { handle?: Handle; rotate?: boolean } {
-    if (this.editor.tool !== 'move' || this.editor.editingText) return {};
+    if (this.editor.tool !== 'move' || this.editor.editingText || this.editor.vectorEdit) return {};
     const hs = this.handles();
     for (const h of hs) if (Math.abs(p.x - h.p.x) <= 5 && Math.abs(p.y - h.p.y) <= 5) return { handle: h.h };
     const q = this.selectionQuad();
@@ -167,11 +177,70 @@ export class Interaction {
     return inside;
   }
 
+  // ── Guias e réguas ─────────────────────────────────────────────────────────
+
+  /** Régua embaixo do cursor: "y" na de cima (cria guia horizontal), "x" na da esquerda. */
+  private rulerAt(p: Point): 'x' | 'y' | null {
+    if (!this.editor.settings.rulers) return null;
+    if (p.y < RULER && p.x >= RULER) return 'y';
+    if (p.x < RULER && p.y >= RULER) return 'x';
+    return null;
+  }
+
+  /** Guia da página perto do cursor (em px de tela). */
+  guideAt(p: Point): number | null {
+    const ed = this.editor;
+    const guides = ed.page.guides ?? [];
+    for (let i = guides.length - 1; i >= 0; i--) {
+      const g = guides[i];
+      const s = ed.worldToScreen({ x: g.at, y: g.at });
+      if (Math.abs((g.axis === 'x' ? s.x : s.y) - (g.axis === 'x' ? p.x : p.y)) <= 3) return i;
+    }
+    return null;
+  }
+
+  private guideValue(axis: 'x' | 'y', w: Point): number {
+    const v = axis === 'x' ? w.x : w.y;
+    // com pouco zoom, a guia anda de 1 em 1; com muito zoom, em frações
+    const step = this.editor.viewport.zoom >= 8 ? 0.1 : 1;
+    return Math.round(v / step) * step;
+  }
+
+  private finishGuide(d: Extract<Drag, { kind: 'guide' }>, p: Point) {
+    const ed = this.editor;
+    const guides = [...(ed.page.guides ?? [])];
+    // soltar em cima da régua apaga a guia
+    const onRuler = d.axis === 'y' ? p.y < RULER : p.x < RULER;
+    if (d.index !== null) {
+      if (onRuler) guides.splice(d.index, 1);
+      else guides[d.index] = { axis: d.axis, at: d.at };
+      ed.setGuides(guides, onRuler ? 'Remover guia' : 'Mover guia');
+    } else if (!onRuler) ed.setGuides([...guides, { axis: d.axis, at: d.at }], 'Adicionar guia');
+  }
+
   // ── Eventos ────────────────────────────────────────────────────────────────
+
+  /** Elementos por cima do canvas (comentários, campos) que não são cliques no desenho. */
+  private outside(e: Event): boolean {
+    return !!(e.target as HTMLElement | null)?.closest?.('[data-no-canvas]');
+  }
+
+  /** Nome de frame (em cima de cada frame do topo) embaixo do ponto, em px de tela. */
+  private frameLabelAt(p: Point): string | null {
+    const labels = this.editor.host?.frameLabels ?? [];
+    for (let i = labels.length - 1; i >= 0; i--) {
+      const l = labels[i];
+      const a = (-l.angle * Math.PI) / 180;
+      const dx = p.x - l.x, dy = p.y - l.y;
+      const x = dx * Math.cos(a) - dy * Math.sin(a), y = dx * Math.sin(a) + dy * Math.cos(a);
+      if (x >= -2 && x <= l.width && y >= -20 && y <= 1) return l.id;
+    }
+    return null;
+  }
 
   private onDown = (e: PointerEvent) => {
     const ed = this.editor;
-    if (ed.home) return;
+    if (ed.home || this.outside(e)) return;
     this.el.focus();
     const p = this.local(e);
     const w = ed.screenToWorld(p);
@@ -181,6 +250,10 @@ export class Interaction {
     if (e.button === 2) return; // menu de contexto trata
     this.el.setPointerCapture(e.pointerId);
 
+    if (ed.tool === 'comment' && e.button === 0 && !this.space) {
+      ed.startComment(w);
+      return;
+    }
     if (e.button === 1 || this.space || ed.tool === 'hand') {
       this.drag = { kind: 'pan', start: p, vx: ed.viewport.x, vy: ed.viewport.y };
       this.el.style.cursor = 'grabbing';
@@ -189,6 +262,31 @@ export class Interaction {
 
     if (ed.tool === 'pen') return this.penDown(w);
 
+    // réguas e guias
+    const ruler = this.rulerAt(p);
+    if (ruler) {
+      this.drag = { kind: 'guide', axis: ruler, index: null, at: this.guideValue(ruler, w) };
+      return;
+    }
+
+    // pontos do vetor em edição
+    if (ed.vectorEdit) {
+      if (this.vector.down(p, w, e.shiftKey)) {
+        if (this.vector.drag) this.drag = { kind: 'vector' };
+        return;
+      }
+      ed.exitVectorEdit();
+    }
+
+    if (ed.tool === 'move' && !this.handleAt(p).handle) {
+      const gi = this.guideAt(p);
+      if (gi !== null) {
+        const g = ed.page.guides![gi];
+        this.drag = { kind: 'guide', axis: g.axis, index: gi, at: g.at };
+        return;
+      }
+    }
+
     if (ed.tool !== 'move') {
       this.drag = { kind: 'create', tool: ed.tool, start: w };
       return;
@@ -196,6 +294,16 @@ export class Interaction {
 
     const hz = this.handleAt(p);
     if (hz.handle) return this.startResize(hz.handle, w);
+    // clique no nome do frame: seleciona o frame (e arrastar move)
+    const label = this.frameLabelAt(p);
+    if (label) {
+      if (e.shiftKey) {
+        ed.toggleSelect(label);
+        if (!ed.selection.includes(label)) return;
+      } else if (!ed.selection.includes(label)) ed.select([label]);
+      this.startMove(w, e.altKey);
+      return;
+    }
     if (hz.rotate) return this.startRotate(w);
 
     const target = pickTarget(ed, w, e.ctrlKey || e.metaKey);
@@ -228,6 +336,14 @@ export class Interaction {
       return;
     }
     switch (d.kind) {
+      case 'guide':
+        d.at = this.guideValue(d.axis, w);
+        this.redraw();
+        break;
+      case 'vector':
+        this.vector.move(w, e.altKey, e.shiftKey);
+        this.redraw();
+        break;
       case 'pan':
         ed.setViewport({ zoom: ed.viewport.zoom, x: d.vx + (p.x - d.start.x), y: d.vy + (p.y - d.start.y) });
         break;
@@ -284,6 +400,7 @@ export class Interaction {
 
   private onUp = (e: PointerEvent) => {
     const ed = this.editor;
+    if (!this.drag && this.outside(e)) return;
     const d = this.drag;
     this.drag = null;
     try {
@@ -294,6 +411,8 @@ export class Interaction {
     this.el.style.cursor = '';
     if (!d) return;
     const w = ed.screenToWorld(this.local(e));
+    if (d.kind === 'guide') this.finishGuide(d, this.local(e));
+    if (d.kind === 'vector') this.vector.up();
     if (d.kind === 'create') this.finishCreate(d, w, e);
     if (d.kind === 'move' && d.moved) this.finishMove(d, w);
     if (d.kind === 'move' && !d.moved && !e.shiftKey) {
@@ -313,11 +432,26 @@ export class Interaction {
 
   private onDouble = (e: MouseEvent) => {
     const ed = this.editor;
+    if (this.outside(e)) return;
     if (ed.tool === 'pen') return this.finishPen(false);
     if (ed.tool !== 'move') return;
-    const w = ed.screenToWorld(this.local(e));
+    const p = this.local(e);
+    const w = ed.screenToWorld(p);
+    if (ed.vectorEdit) {
+      if (!this.vector.double(p)) ed.exitVectorEdit();
+      this.redraw();
+      return;
+    }
+    if (this.guideAt(p) !== null) return;
+    // duplo clique no nome do frame: renomear
+    const label = this.frameLabelAt(p);
+    if (label) {
+      ed.select([label]);
+      return ed.renameLayer();
+    }
     const sel = ed.selection.length === 1 ? ed.model.index.get(ed.selection[0]) : null;
     if (sel?.type === 'text') return this.onTextEdit(sel.id);
+    if (sel?.type === 'path' && pickTarget(ed, w, true) === sel.id) return ed.enterVectorEdit(sel.id);
     if (sel?.type === 'instance') {
       // texto dentro da instância: edita o override
       const path = hitPath(ed, w, 2 / ed.viewport.zoom);
@@ -362,6 +496,21 @@ export class Interaction {
 
   private updateHover(p: Point, w: Point) {
     const ed = this.editor;
+    const ruler = this.rulerAt(p);
+    if (ruler && !this.space && ed.tool !== 'hand') {
+      this.el.style.cursor = ruler === 'y' ? 'ns-resize' : 'ew-resize';
+      ed.setHover(null);
+      return;
+    }
+    if (ed.vectorEdit && ed.tool === 'move' && !this.space) {
+      const hit = this.vector.hitTest(p);
+      const before = JSON.stringify(this.vector.hover);
+      this.vector.hover = hit;
+      this.el.style.cursor = hit?.kind === 'segment' ? 'copy' : hit ? 'move' : 'default';
+      if (JSON.stringify(hit) !== before) this.redraw();
+      ed.setHover(null);
+      return;
+    }
     if (ed.tool !== 'move' || this.space) {
       this.el.style.cursor = this.space || ed.tool === 'hand' ? 'grab' : ed.tool === 'text' ? 'text' : 'crosshair';
       ed.setHover(null);
@@ -371,6 +520,18 @@ export class Interaction {
     if (hz.handle) {
       const n = ed.selection.length === 1 ? ed.model.index.get(ed.selection[0]) : null;
       this.el.style.cursor = rotatedCursor(hz.handle, n?.rotation ?? 0);
+      ed.setHover(null);
+      return;
+    }
+    const label = this.frameLabelAt(p);
+    if (label) {
+      this.el.style.cursor = '';
+      ed.setHover(label);
+      return;
+    }
+    const gi = this.guideAt(p);
+    if (gi !== null && !hz.rotate) {
+      this.el.style.cursor = ed.page.guides![gi].axis === 'x' ? 'ew-resize' : 'ns-resize';
       ed.setHover(null);
       return;
     }
@@ -522,11 +683,29 @@ export class Interaction {
     if (parent && parent !== ed.pageId) others.push(ed.worldBounds(parent));
     // frames do topo também servem de referência
     if (parent === ed.pageId) for (const f of ed.page.children) if (!exclude.has(f.id) && 'children' in f) for (const c of f.children) others.push(ed.worldBounds(c.id));
+    // guias da página e colunas/linhas da grade de layout do frame pai (só valem num eixo)
+    const lineXs: number[] = [], lineYs: number[] = [];
+    for (const g of ed.page.guides ?? []) (g.axis === 'x' ? lineXs : lineYs).push(g.at);
+    const pn = parent ? ed.model.index.get(parent) : undefined;
+    if (pn && 'grids' in pn && pn.grids?.length && ed.settings.layoutGrids && !pn.rotation) {
+      const fb = ed.worldBounds(pn.id);
+      const edges = gridSnapEdges(pn.grids, pn.width, pn.height);
+      lineXs.push(...edges.xs.map((x) => fb.x + x));
+      lineYs.push(...edges.ys.map((y) => fb.y + y));
+    }
     const th = 6 / ed.viewport.zoom;
     const xs = [box.x, box.x + box.width / 2, box.x + box.width];
     const ys = [box.y, box.y + box.height / 2, box.y + box.height];
     let bestX: { d: number; at: number; r: Rect } | null = null;
     let bestY: { d: number; at: number; r: Rect } | null = null;
+    for (const lx of lineXs) for (const x of xs) {
+      const d = lx - x;
+      if (Math.abs(d) <= th && (!bestX || Math.abs(d) < Math.abs(bestX.d))) bestX = { d, at: lx, r: { x: lx, y: box.y, width: 0, height: box.height } };
+    }
+    for (const ly of lineYs) for (const y of ys) {
+      const d = ly - y;
+      if (Math.abs(d) <= th && (!bestY || Math.abs(d) < Math.abs(bestY.d))) bestY = { d, at: ly, r: { x: box.x, y: ly, width: box.width, height: 0 } };
+    }
     for (const r of others) {
       for (const cx of [r.x, r.x + r.width / 2, r.x + r.width]) for (const x of xs) {
         const d = cx - x;
@@ -650,6 +829,14 @@ export class Interaction {
       { op: 'set', id: n0.id, key: 'width', value: Math.round(w * 100) / 100 },
       { op: 'set', id: n0.id, key: 'height', value: Math.round(h * 100) / 100 },
     ];
+    // vetor: o desenho acompanha o novo tamanho
+    if (cur.type === 'path' && n0.type === 'path' && n0.width > 0 && n0.height > 0 && n0.d) {
+      ops.push({ op: 'set', id: n0.id, key: 'd', value: scalePath(n0.d, w / n0.width, h / n0.height) });
+    }
+    // texto em caminho: a curva acompanha o novo tamanho
+    if (cur.type === 'text' && n0.type === 'text' && n0.textPath && n0.width > 0 && n0.height > 0) {
+      ops.push({ op: 'set', id: n0.id, key: 'textPath', value: { ...n0.textPath, d: scalePath(n0.textPath.d, w / n0.width, h / n0.height) } });
+    }
     if (cur.type === 'text') {
       const t = cur as TextNode;
       const mode = changedH ? 'none' : changedW && t.autoResize === 'width' ? 'height' : t.autoResize;
@@ -764,6 +951,11 @@ export class Interaction {
   }
 
   cancel(): boolean {
+    if (this.drag?.kind === 'guide') {
+      this.drag = null;
+      this.redraw();
+      return true;
+    }
     if (this.pen.length) {
       this.finishPen(false);
       return true;

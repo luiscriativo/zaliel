@@ -1,7 +1,7 @@
 // Liga o CanvasKit ao elemento <canvas>: carregamento, laço de desenho, medida de texto e exportação.
 import CanvasKitInit, { type CanvasKit } from 'canvaskit-wasm';
-import { FontRegistry, Renderer } from '@zaliel/renderer';
-import type { SceneNode, TextNode } from '@zaliel/core';
+import { FontRegistry, Renderer, booleanPathData, outlineData, normalizePath, type PathData } from '@zaliel/renderer';
+import type { ContainerNode, SceneNode, TextNode } from '@zaliel/core';
 import type { Editor } from '../editor';
 import { drawOverlay } from './overlay';
 import type { Interaction } from './interaction';
@@ -24,6 +24,8 @@ export class CanvasHost {
   fonts: FontRegistry;
   canvas: HTMLCanvasElement | null = null;
   interaction: Interaction | null = null;
+  /** Onde ficou o nome de cada frame do topo no último desenho (px de tela), para clicar nele. */
+  frameLabels: { id: string; x: number; y: number; width: number; angle: number }[] = [];
   private raf = 0;
   private width = 0;
   private height = 0;
@@ -51,7 +53,8 @@ export class CanvasHost {
       clearTimeout(this.relayoutTimer);
       this.relayoutTimer = window.setTimeout(() => {
         this.renderer.text.clear();
-        this.editor.model.refreshLayout();
+        this.renderer.invalidate();
+        this.editor.relayoutAfterFonts();
         this.invalidate();
       }, 30);
     });
@@ -115,6 +118,7 @@ export class CanvasHost {
   }
 
   resetDocument(): void {
+    this.renderer.invalidate();
     this.renderer.resetImages();
     this.renderer.text.clear();
   }
@@ -144,6 +148,55 @@ export class CanvasHost {
 
   exportImage(n: SceneNode, scale: number, format: 'png' | 'jpg' | 'webp'): Uint8Array | null {
     return this.renderer.exportImage(this.editor.doc, n, this.editor.resolve, scale, format);
+  }
+
+  /** Pixels RGBA de um nó (para o PDF). */
+  pixels(n: SceneNode, scale: number): { width: number; height: number; rgba: Uint8Array } | null {
+    return this.renderer.exportPixels(this.editor.doc, n, this.editor.resolve, scale);
+  }
+
+  /**
+   * Imagem codificada pelo codificador do próprio navegador (bem mais rápido que o do Skia
+   * e assíncrono: a janela continua respondendo em exportações grandes).
+   */
+  async encodeImage(n: SceneNode, scale: number, format: 'png' | 'jpg' | 'webp'): Promise<Uint8Array | null> {
+    const px = this.pixels(n, scale);
+    if (!px || typeof OffscreenCanvas === 'undefined') return this.exportImage(n, scale, format);
+    const canvas = new OffscreenCanvas(px.width, px.height);
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return this.exportImage(n, scale, format);
+    const image = new ImageData(new Uint8ClampedArray(px.rgba), px.width, px.height);
+    if (format === 'jpg') {
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(0, 0, px.width, px.height);
+      const tmp = new OffscreenCanvas(px.width, px.height);
+      tmp.getContext('2d')!.putImageData(image, 0, 0);
+      ctx.drawImage(tmp, 0, 0);
+    } else ctx.putImageData(image, 0, 0);
+    const type = format === 'jpg' ? 'image/jpeg' : format === 'webp' ? 'image/webp' : 'image/png';
+    const blob = await canvas.convertToBlob({ type, quality: 0.92 });
+    return new Uint8Array(await blob.arrayBuffer());
+  }
+
+  /** Resultado de uma operação booleana como caminho SVG (Path.MakeFromOp). */
+  booleanData(n: ContainerNode): PathData {
+    return booleanPathData(this.ck, n, this.editor.resolve);
+  }
+
+  /** Contorno de uma forma como caminho SVG (para converter em vetor). Textos viram o contorno das letras. */
+  outline(n: SceneNode): PathData {
+    if (n.type === 'text') return { d: this.renderer.textOutline(n) ?? '', fillRule: 'nonzero' };
+    return outlineData(this.ck, n, this.editor.resolve);
+  }
+
+  /** Caminho SVG levado por uma matriz [a,b,c,d,e,f] e sem arcos (`keepOrigin`: não move para 0,0). */
+  normalizePath(d: string, m: number[] = [1, 0, 0, 1, 0, 0], evenOdd = false, keepOrigin = false) {
+    return normalizePath(this.ck, d, m as [number, number, number, number, number, number], evenOdd, keepOrigin);
+  }
+
+  /** O texto pode virar vetor agora? (a fonte precisa estar carregada e legível) */
+  canOutlineText(n: SceneNode): boolean {
+    return n.type === 'text' && this.renderer.textOutline(n) !== null;
   }
 
   /** Miniatura (data URL) de um nó — usada no painel de recursos. */

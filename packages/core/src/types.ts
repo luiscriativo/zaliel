@@ -1,5 +1,5 @@
 // Modelo do documento .zal — é exatamente o que vai para o arquivo em JSON.
-// Coordenadas de cada nó são relativas ao nó pai (como no Figma e no pen.dev).
+// Coordenadas de cada nó são relativas ao nó pai.
 
 export type NodeType =
   | 'frame'
@@ -12,6 +12,8 @@ export type NodeType =
   | 'path'
   | 'text'
   | 'component'
+  | 'component-set'
+  | 'boolean'
   | 'instance';
 
 export type BlendMode =
@@ -136,6 +138,9 @@ export interface BaseNode {
   width: number;
   height: number;
   rotation?: number; // graus, em torno do centro
+  /** Espelhado na horizontal / vertical (em torno do centro, antes da rotação). */
+  flipX?: boolean;
+  flipY?: boolean;
   opacity?: number;
   visible?: boolean;
   locked?: boolean;
@@ -152,17 +157,110 @@ export interface BaseNode {
   constraints?: Constraints;
   /** Variáveis ligadas a propriedades (ex.: { "opacity": "var-id" }). */
   bindings?: Record<string, string>;
+  /** Estilos ligados (o valor também fica gravado no nó). */
+  styles?: NodeStyles;
+  /** Dentro de um componente: propriedades do componente que controlam este nó. */
+  propRefs?: PropRefs;
+  /** Protótipo: o que acontece ao interagir com o nó. */
+  interactions?: Interaction[];
   /** Campo livre para plugins e outras ferramentas; o editor preserva sem interpretar. */
   meta?: Record<string, unknown>;
 }
 
+export type BooleanOp = 'union' | 'subtract' | 'intersect' | 'exclude';
+
 export interface ContainerNode extends BaseNode {
-  type: 'frame' | 'group' | 'component';
+  type: 'frame' | 'group' | 'component' | 'component-set' | 'boolean';
   children: SceneNode[];
   clip?: boolean;
   layout?: AutoLayout;
   /** Componente: descrição mostrada na biblioteca. */
   description?: string;
+  /** Componente dentro de um conjunto: valor de cada propriedade de variante (ex.: { Estado: "Hover" }). */
+  variant?: Record<string, string>;
+  /** Componente ou conjunto de variantes: propriedades que as instâncias podem mudar. */
+  properties?: ComponentProperty[];
+  /** Operação booleana: como os filhos se combinam. */
+  booleanOp?: BooleanOp;
+  /** Frames: grades de layout (colunas, linhas ou grade quadrada). */
+  grids?: LayoutGrid[];
+}
+
+// ── Propriedades de componente ───────────────────────────────────────────────
+
+export type ComponentProperty =
+  | { id: string; name: string; type: 'boolean'; default: boolean }
+  | { id: string; name: string; type: 'text'; default: string }
+  | { id: string; name: string; type: 'swap'; default: string; library?: string };
+
+/** Propriedades do componente ligadas a um nó interno. */
+export interface PropRefs {
+  /** Booleana que mostra/oculta o nó. */
+  visible?: string;
+  /** Texto que substitui o conteúdo (só em nós de texto). */
+  text?: string;
+  /** Troca de instância (só em instâncias aninhadas). */
+  component?: string;
+}
+
+// ── Grades de layout ─────────────────────────────────────────────────────────
+
+export interface LayoutGrid {
+  type: 'columns' | 'rows' | 'grid';
+  /** Colunas/linhas: quantidade. */
+  count: number;
+  /** Grade quadrada: tamanho da célula. Colunas/linhas com alinhamento diferente de "stretch": largura de cada uma. */
+  size: number;
+  gutter: number;
+  margin: number;
+  alignment: 'stretch' | 'start' | 'center' | 'end';
+  color: Hex;
+  visible?: boolean;
+}
+
+// ── Estilos ──────────────────────────────────────────────────────────────────
+
+export interface NodeStyles {
+  fill?: string;
+  stroke?: string;
+  text?: string;
+  effect?: string;
+}
+
+export type Style =
+  | { id: string; name: string; type: 'color'; paints: Paint[]; description?: string }
+  | { id: string; name: string; type: 'text'; text: TextStyle; description?: string }
+  | { id: string; name: string; type: 'effect'; effects: Effect[]; description?: string };
+
+// ── Protótipo ────────────────────────────────────────────────────────────────
+
+export type Transition = 'instant' | 'dissolve' | 'slide-left' | 'slide-right' | 'slide-up' | 'slide-down';
+
+export type OverlayPosition = 'center' | 'top' | 'bottom' | 'left' | 'right' | 'top-left' | 'top-right' | 'bottom-left' | 'bottom-right';
+
+export interface Interaction {
+  trigger: 'click';
+  /** navigate: troca de tela · overlay: abre um frame por cima (modal) · close: fecha a sobreposição · back: volta. */
+  action: 'navigate' | 'back' | 'overlay' | 'close';
+  /** Frame de destino (id de um frame do topo da página). */
+  target?: string;
+  transition?: Transition;
+  /** Duração da transição em ms. */
+  duration?: number;
+  /** Como a sobreposição aparece (só com action "overlay"). */
+  overlay?: {
+    position?: OverlayPosition;
+    /** Cor do fundo atrás da sobreposição (#rrggbbaa). Vazio = sem fundo. */
+    background?: string;
+    /** Fechar ao clicar fora dela. */
+    closeOutside?: boolean;
+  };
+}
+
+export interface Guide {
+  /** "x": linha vertical na posição x; "y": linha horizontal na posição y. */
+  axis: 'x' | 'y';
+  at: number;
 }
 
 export interface ShapeNode extends BaseNode {
@@ -185,19 +283,40 @@ export interface TextNode extends BaseNode {
   text: string;
   style: TextStyle;
   autoResize: 'width' | 'height' | 'none';
+  /** Texto que segue um caminho (em vez de linhas). */
+  textPath?: TextPath;
+}
+
+export interface TextPath {
+  /** Caminho SVG no espaço do próprio texto (0..largura, 0..altura). */
+  d: string;
+  /** Onde o texto começa, em % do comprimento do caminho. */
+  start?: number;
+  /** Letras do outro lado do caminho (por dentro de um círculo, por exemplo). */
+  flip?: boolean;
 }
 
 export interface InstanceOverride {
   text?: string;
   fills?: Paint[];
+  strokes?: Stroke[];
   visible?: boolean;
+  opacity?: number;
   /** Troca de componente aninhado (instance swap). */
   componentId?: string;
+  /** Tamanho e comportamento dentro do auto layout, só nesta instância. */
+  sizing?: Sizing;
+  width?: number;
+  height?: number;
+  /** Textos: como a caixa acompanha o conteúdo. */
+  autoResize?: TextNode['autoResize'];
 }
 
 export interface InstanceNode extends BaseNode {
   type: 'instance';
   componentId: string;
+  /** Valores das propriedades do componente (id da propriedade → valor). */
+  props?: Record<string, boolean | string>;
   /** Id da biblioteca quando o componente vem de outro arquivo. */
   library?: string;
   /** Overrides por id do nó dentro do componente. */
@@ -211,6 +330,10 @@ export interface Page {
   name: string;
   background: Hex;
   children: SceneNode[];
+  /** Guias arrastadas das réguas. */
+  guides?: Guide[];
+  /** Protótipo: frame onde a apresentação começa. */
+  flowStart?: string;
 }
 
 export type VariableType = 'color' | 'number' | 'string' | 'boolean';
@@ -247,8 +370,10 @@ export interface LinkedLibrary {
   path: string;
   /** Hash do conteúdo publicado, para detectar atualizações. */
   hash: string;
+  /** Componentes e conjuntos de variantes publicados. */
   components: ContainerNode[];
   variables?: VariableCollection[];
+  styles?: Style[];
   assets?: Record<string, Asset>;
 }
 
@@ -259,6 +384,8 @@ export interface ZalDocument {
   name: string;
   pages: Page[];
   variables: VariableCollection[];
+  /** Estilos de cor, texto e efeito. */
+  styles?: Style[];
   libraries: LinkedLibrary[];
   assets: Record<string, Asset>;
   /** Preferências do arquivo (grade, página atual, etc.). */
@@ -268,6 +395,47 @@ export interface ZalDocument {
     modes?: Record<string, string>;
   };
   meta?: Record<string, unknown>;
+  /** Comentários deixados no canvas. */
+  comments?: DocComment[];
+  /** Versões guardadas dentro do arquivo (o histórico). */
+  versions?: DocVersion[];
+}
+
+/** Resposta dentro de um comentário. */
+export interface CommentReply {
+  id: string;
+  author: string;
+  text: string;
+  createdAt: number;
+}
+
+/** Comentário preso a um ponto de uma página (ou a uma camada, para acompanhar quando ela muda de lugar). */
+export interface DocComment {
+  id: string;
+  pageId: string;
+  /** Posição no canvas; com `nodeId`, relativa ao canto da camada. */
+  x: number;
+  y: number;
+  nodeId?: string;
+  author: string;
+  text: string;
+  createdAt: number;
+  resolved?: boolean;
+  replies?: CommentReply[];
+}
+
+/** Uma versão do arquivo: o documento inteiro daquele momento, comprimido (sem imagens e sem o próprio histórico). */
+export interface DocVersion {
+  id: string;
+  name: string;
+  createdAt: number;
+  /** Criada sozinha ao salvar (as automáticas antigas são descartadas; as com nome ficam). */
+  auto?: boolean;
+  /** JSON do documento comprimido com gzip, em base64. */
+  data: string;
+  /** Tamanho do JSON antes de comprimir (bytes). */
+  size: number;
+  pages: number;
 }
 
 export const FORMAT_VERSION = 1;

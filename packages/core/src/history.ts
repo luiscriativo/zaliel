@@ -38,9 +38,16 @@ export class Model {
     return this.savedStep !== (this.past[this.past.length - 1] ?? null);
   }
 
-  markSaved(): void {
-    this.mergeKey = null; // o próximo passo não pode se fundir com o que já foi salvo
-    this.savedStep = this.past[this.past.length - 1] ?? null;
+  /** Ponto atual do histórico, para marcar como salvo depois de uma gravação que demora (assíncrona). */
+  checkpoint(): Step | null {
+    this.mergeKey = null; // o próximo passo não pode se fundir com o que está sendo salvo
+    return this.past[this.past.length - 1] ?? null;
+  }
+
+  /** Marca como salvo o ponto atual (ou `at`, vindo de `checkpoint`). */
+  markSaved(at?: Step | null): void {
+    this.mergeKey = null;
+    this.savedStep = at === undefined ? (this.past[this.past.length - 1] ?? null) : at;
   }
 
   /** Força "não salvo" (ex.: trabalho recuperado). */
@@ -104,6 +111,28 @@ export class Model {
     this.mergeKey = null;
   }
 
+  /** Junta num passo só tudo o que entrou no histórico a partir da posição `from` (um "desfazer" desfaz tudo). */
+  squash(from: number, label: string): void {
+    if (this.past.length - from < 2) {
+      if (this.past.length - from === 1) this.past[from].label = label;
+      return;
+    }
+    const steps = this.past.splice(from);
+    const undo: Op[] = [];
+    const redo: Op[] = [];
+    for (const s of steps) redo.push(...s.redo);
+    for (let i = steps.length - 1; i >= 0; i--) undo.push(...steps[i].undo);
+    this.past.push({ label, undo, redo, selection: steps[0].selection });
+    this.mergeKey = null;
+  }
+
+  /** Desfaz até o histórico voltar para a posição `to` e descarta o que foi desfeito (não vira "refazer"). */
+  rollback(to: number): void {
+    while (this.past.length > to) this.undo();
+    this.future = [];
+    this.mergeKey = null;
+  }
+
   undo(): Step | null {
     const step = this.past.pop();
     if (!step) return null;
@@ -124,10 +153,16 @@ export class Model {
     return step;
   }
 
-  /** Recalcula o layout sem registrar no histórico (ex.: depois que uma fonte carregou). */
-  refreshLayout(): void {
+  /**
+   * Recalcula o layout sem registrar no histórico (ex.: depois que uma fonte carregou).
+   * Com `pageIds`, só nessas páginas (arquivos grandes abrem bem mais rápido).
+   */
+  refreshLayout(pageIds?: string[]): void {
     const ctx = { measureText: this.measureText, changes: [] as Change[] };
-    for (const page of this.doc.pages) for (const n of page.children) layoutNode(n, ctx);
+    for (const page of this.doc.pages) {
+      if (pageIds && !pageIds.includes(page.id)) continue;
+      for (const n of page.children) layoutNode(n, ctx);
+    }
     if (ctx.changes.length) this.emit('Layout', []);
   }
 

@@ -1,18 +1,22 @@
 import { useState } from 'react';
-import { MousePointer2, Hand, Frame, Square, Circle, Minus, Triangle, Star, Type, PenTool } from 'lucide-react';
+import { MousePointer2, Hand, Frame, Square, Circle, Minus, Triangle, Star, Type, PenTool, MessageCircle } from 'lucide-react';
 import { useEditor, isMac } from './hooks';
 import { Menu, type MenuEntry } from './Menu';
 import type { Tool } from '../editor';
 import type { RecentFile } from '../platform';
 
 const MENUS: { label: string; items: MenuEntry[] }[] = [
-  { label: 'Arquivo', items: ['file.new', 'file.newWindow', 'file.open', '-', 'file.save', 'file.saveAs', '-', 'file.import', 'file.exportPng', 'file.exportSvg', '-', 'app.settings', '-', 'file.close'] },
-  { label: 'Editar', items: ['edit.undo', 'edit.redo', '-', 'edit.cut', 'edit.copy', 'edit.paste', 'edit.duplicate', 'edit.delete', '-', 'edit.selectAll'] },
+  { label: 'Arquivo', items: ['file.new', 'file.newWindow', 'file.open', 'file.importDesign', '-', 'file.save', 'file.saveAs', 'file.autoSave', 'file.saveVersion', '-', 'file.import', 'file.exportPng', 'file.exportSvg', 'file.exportPdf', 'file.exportBatch', '-', 'app.settings', '-', 'file.close'] },
+  { label: 'Editar', items: ['edit.undo', 'edit.redo', '-', 'edit.cut', 'edit.copy', 'edit.paste', 'edit.duplicate', 'edit.delete', '-', 'edit.selectAll', 'edit.find'] },
   {
     label: 'Objeto',
-    items: ['obj.group', 'obj.ungroup', 'obj.frame', 'obj.autolayout', '-', 'obj.component', 'obj.detach', 'obj.main', '-', 'obj.front', 'obj.forward', 'obj.backward', 'obj.back', '-', 'obj.alignLeft', 'obj.alignH', 'obj.alignRight', 'obj.alignTop', 'obj.alignV', 'obj.alignBottom', '-', 'obj.hide', 'obj.lock'],
+    items: [
+      'obj.group', 'obj.ungroup', 'obj.frame', 'obj.autolayout', '-', 'obj.component', 'obj.variants', 'obj.addVariant', 'obj.detach', 'obj.main', '-',
+      'obj.union', 'obj.subtract', 'obj.intersect', 'obj.exclude', 'obj.flatten', 'obj.editPoints', '-', 'obj.flipH', 'obj.flipV', 'obj.textOnPath', '-',
+      'obj.front', 'obj.forward', 'obj.backward', 'obj.back', '-', 'obj.alignLeft', 'obj.alignH', 'obj.alignRight', 'obj.alignTop', 'obj.alignV', 'obj.alignBottom', '-', 'obj.hide', 'obj.lock',
+    ],
   },
-  { label: 'Exibir', items: ['view.zoomIn', 'view.zoomOut', 'view.zoom100', 'view.fit', 'view.selection', '-', 'view.pixelGrid', 'view.snapping', '-', 'view.variables'] },
+  { label: 'Exibir', items: ['view.zoomIn', 'view.zoomOut', 'view.zoom100', 'view.fit', 'view.selection', '-', 'view.pixelGrid', 'view.snapping', 'view.rulers', 'view.layoutGrids', 'view.clearGuides', 'view.comments', '-', 'view.variables', '-', 'view.present'] },
   { label: 'Ajuda', items: ['help.shortcuts', '-', 'help.updates', 'help.about'] },
 ];
 
@@ -27,6 +31,7 @@ export const TOOLS: { tool: Tool; icon: React.ReactNode; tip: string }[] = [
   { tool: 'star', icon: <Star size={15} strokeWidth={1.6} />, tip: 'Estrela' },
   { tool: 'pen', icon: <PenTool size={15} strokeWidth={1.6} />, tip: 'Caneta  P' },
   { tool: 'text', icon: <Type size={16} strokeWidth={1.6} />, tip: 'Texto  T' },
+  { tool: 'comment', icon: <MessageCircle size={15} strokeWidth={1.6} />, tip: 'Comentário  C' },
 ];
 
 export function TitleBar() {
@@ -42,9 +47,9 @@ export function TitleBar() {
 
   const items = (i: number): MenuEntry[] => {
     if (i !== 0 || !recent.length) return MENUS[i].items;
-    const rec: MenuEntry[] = [{ heading: 'Recentes' }, ...recent.slice(0, 6).map((r) => ({ label: r.name, run: async () => (await ed.confirmDiscard()) && ed.openPath(r.path), disabled: r.exists === false }))];
+    const rec: MenuEntry[] = [{ heading: 'Recentes' }, ...recent.slice(0, 6).map((r) => ({ label: r.name, run: () => ed.openPath(r.path), disabled: r.exists === false }))];
     const list = [...MENUS[0].items];
-    list.splice(3, 0, ...rec, '-');
+    list.splice(4, 0, ...rec, '-');
     return list;
   };
 

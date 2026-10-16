@@ -2,16 +2,20 @@ import { useMemo, useState } from 'react';
 import {
   AlignStartVertical, AlignCenterVertical, AlignEndVertical, AlignStartHorizontal, AlignCenterHorizontal, AlignEndHorizontal,
   AlignHorizontalDistributeCenter, AlignVerticalDistributeCenter, Plus, Minus, Eye, EyeOff, ArrowRight, ArrowDown, WrapText,
-  RotateCw, Scan, AlignLeft, AlignCenter, AlignRight, AlignJustify, Underline, Strikethrough, Variable, Component, Unlink, CornerUpLeft, Download, SquareDashed,
-  MoveHorizontal, MoveVertical, ArrowUpToLine, ArrowDownToLine, FoldVertical,
+  RotateCw, Scan, AlignLeft, AlignCenter, AlignRight, AlignJustify, Underline, Strikethrough, Variable, Component, Download, SquareDashed,
+  MoveHorizontal, MoveVertical, ArrowUpToLine, ArrowDownToLine, FoldVertical, FlipVertical2, SquaresUnite, SquaresSubtract, SquaresIntersect, SquaresExclude, Spline, PenTool, Layers2, Ruler,
 } from 'lucide-react';
 import {
-  findVariable, overridableTexts, allCollections, clone,
-  type AutoLayout, type BlendMode, type ContainerNode, type Effect, type InstanceNode, type Paint, type SceneNode, type ShapeNode, type Stroke, type TextNode, type TextStyle, type SizingMode,
+  findVariable, allCollections, clone, detachPatch, scalePath,
+  type AutoLayout, type BlendMode, type BooleanOp, type ContainerNode, type Effect, type Paint, type SceneNode, type ShapeNode, type Stroke, type TextNode, type TextStyle, type SizingMode,
 } from '@zaliel/core';
 import { useEditor } from './hooks';
-import { Check, IconBtn, NumberField, Section, Seg, Select, TextField, common, MIXED, type Maybe } from './controls';
+import { Check, IconBtn, NumberField, Section, Seg, Select, common, MIXED, type Maybe } from './controls';
 import { PaintPicker, paintCss } from './ColorPicker';
+import { InstanceSection, PropertiesSection, PropertyBindSection, VariantSetSection, VariantValuesSection } from './ComponentPanels';
+import { LayoutGridSection } from './GridSection';
+import { PrototypePanel } from './PrototypePanel';
+import { LocalStyles, StyleButton, StyleRow, linkedStyle } from './Styles';
 
 const BLENDS: { value: BlendMode; label: string }[] = [
   { value: 'normal', label: 'Normal' }, { value: 'multiply', label: 'Multiplicar' }, { value: 'screen', label: 'Tela' }, { value: 'overlay', label: 'Sobrepor' },
@@ -21,19 +25,21 @@ const BLENDS: { value: BlendMode; label: string }[] = [
 ];
 
 const TYPE_NAMES: Record<string, string> = {
-  frame: 'Frame', group: 'Grupo', rect: 'Retângulo', ellipse: 'Elipse', line: 'Linha', polygon: 'Polígono', star: 'Estrela', path: 'Vetor', text: 'Texto', component: 'Componente', instance: 'Instância',
+  frame: 'Frame', group: 'Grupo', rect: 'Retângulo', ellipse: 'Elipse', line: 'Linha', polygon: 'Polígono', star: 'Estrela', path: 'Vetor', text: 'Texto', component: 'Componente',
+  'component-set': 'Variantes', boolean: 'Booleana', instance: 'Instância',
 };
 
 export function DesignPanel() {
-  const ed = useEditor('selection', 'doc');
+  const ed = useEditor('selection', 'doc', 'ui');
   const nodes = ed.selectedNodes();
   return (
     <aside className="panel right">
       <div className="tabs">
-        <button className="on">Design</button>
+        <button className={ed.rightTab === 'design' ? 'on' : ''} onClick={() => ed.setRightTab('design')}>Design</button>
+        <button className={ed.rightTab === 'prototype' ? 'on' : ''} onClick={() => ed.setRightTab('prototype')}>Protótipo</button>
       </div>
       <div className="scroll">
-        {nodes.length === 0 ? <PageSection /> : <NodeSections nodes={nodes} />}
+        {ed.rightTab === 'prototype' ? <PrototypePanel /> : nodes.length === 0 ? <PageSection /> : <NodeSections nodes={nodes} />}
       </div>
     </aside>
   );
@@ -88,7 +94,20 @@ function PageSection() {
           </div>
         )}
       </Section>
-      <div className="empty-state" style={{ paddingTop: 36 }}>
+      <LocalStyles />
+      <Section title="Guias" actions={ed.page.guides?.length ? <button className="btn small ghost" onClick={() => ed.setGuides([], 'Remover guias')}>Remover todas</button> : undefined}>
+        <div className="muted" style={{ lineHeight: 1.55 }}>
+          {ed.page.guides?.length ? `${ed.page.guides.length} guia${ed.page.guides.length === 1 ? '' : 's'} nesta página. ` : ''}
+          {ed.settings.rulers ? (
+            <>Arraste a partir das réguas para criar guias; arraste de volta para a régua para apagar.</>
+          ) : (
+            <>
+              <Ruler size={11} style={{ verticalAlign: -1 }} /> Réguas ocultas — <a style={{ color: 'var(--accent)', cursor: 'pointer' }} onClick={() => ed.setSettings({ rulers: true })}>mostrar (Shift+R)</a>
+            </>
+          )}
+        </div>
+      </Section>
+      <div className="empty-state" style={{ paddingTop: 24 }}>
         <div className="title">Nada selecionado</div>
         Clique numa camada para ver e editar as propriedades dela.
       </div>
@@ -103,9 +122,12 @@ function NodeSections({ nodes }: { nodes: SceneNode[] }) {
   const type = common(nodes.map((n) => n.type));
   const parent = single ? ed.model.index.get(ed.model.index.parentId(single.id)!) : null;
   const parentLayout = !!(parent && 'layout' in parent && parent.layout);
-  const containers = nodes.filter((n) => n.type === 'frame' || n.type === 'component') as ContainerNode[];
+  const containers = nodes.filter((n) => n.type === 'frame' || n.type === 'component' || n.type === 'component-set') as ContainerNode[];
+  const frames = nodes.filter((n) => n.type === 'frame' || n.type === 'component') as ContainerNode[];
   const texts = nodes.filter((n) => n.type === 'text') as TextNode[];
   const set = (key: string, merge?: string) => (v: unknown) => ed.setProp(ids, key, v, merge);
+  const variantSet = single?.type === 'component' ? ed.setFor(single.id) : undefined;
+  const owner = single && single.type !== 'component' && single.type !== 'component-set' ? ed.propertyOwner(single.id) : undefined;
 
   return (
     <>
@@ -119,10 +141,31 @@ function NodeSections({ nodes }: { nodes: SceneNode[] }) {
           {single && (single.type === 'frame' || single.type === 'group') && (
             <IconBtn icon={<Component size={14} />} tip="Criar componente" onClick={() => ed.wrap('component')} />
           )}
+          {nodes.length > 1 && nodes.every((n) => n.type === 'component') && !ed.setFor(nodes[0].id) && (
+            <IconBtn icon={<Layers2 size={14} />} tip="Combinar como variantes" onClick={() => ed.combineAsVariants()} />
+          )}
+          {single?.type === 'component' && !variantSet && <IconBtn icon={<Layers2 size={14} />} tip="Criar variantes a partir deste componente" onClick={() => ed.addVariant(single.id)} />}
         </div>
+        {single?.type === 'component-set' && <div className="label" style={{ marginTop: 2 }}>{single.name}</div>}
+        {variantSet && <div className="label" style={{ marginTop: 2 }}>Variante de “{variantSet.name}”</div>}
       </div>
 
+      {nodes.length > 1 && <BooleanBar />}
       {single?.type === 'instance' && <InstanceSection inst={single} />}
+      {single?.type === 'component-set' && <VariantSetSection set={single} />}
+      {single?.type === 'component-set' && <PropertiesSection owner={single} />}
+      {single?.type === 'component' && variantSet && <VariantValuesSection comp={single} set={variantSet} />}
+      {single?.type === 'component' && !variantSet && <PropertiesSection owner={single} />}
+      {single && owner && <PropertyBindSection node={single} owner={owner} />}
+      {single?.type === 'boolean' && <BooleanSection id={single.id} op={single.booleanOp ?? 'union'} />}
+      {single && ['path', 'rect', 'ellipse', 'polygon', 'star', 'line'].includes(single.type) && (
+        <div className="section" style={{ paddingTop: 8, paddingBottom: 8 }}>
+          <div className="row" style={{ flexWrap: 'wrap' }}>
+            <button className="btn small" onClick={() => ed.enterVectorEdit(single.id)} title="Duplo clique ou Enter num vetor também abrem os pontos"><PenTool size={12} /> Editar pontos</button>
+            {single.type !== 'path' && <button className="btn small ghost" onClick={() => ed.flatten([single.id])} title="Ctrl+E"><Spline size={12} /> Converter em vetor</button>}
+          </div>
+        </div>
+      )}
       {single?.type === 'component' && (
         <Section title="Componente">
           <textarea
@@ -171,6 +214,7 @@ function NodeSections({ nodes }: { nodes: SceneNode[] }) {
       </Section>
 
       {containers.length === nodes.length && <AutoLayoutSection nodes={containers} />}
+      {frames.length === nodes.length && <LayoutGridSection nodes={frames} />}
 
       <Section title="Aparência">
         <div className="grid2">
@@ -191,6 +235,8 @@ function NodeSections({ nodes }: { nodes: SceneNode[] }) {
 function resize(ed: ReturnType<typeof useEditor>, ids: string[], key: 'width' | 'height', v: number, merge?: string) {
   ed.setEach(ids, (n) => {
     const patch: Record<string, unknown> = { [key]: v };
+    // vetor: o desenho acompanha o novo tamanho
+    if (n.type === 'path' && n[key] > 0) patch.d = scalePath(n.d, key === 'width' ? v / n.width : 1, key === 'height' ? v / n.height : 1);
     if (n.type === 'text') {
       const t = n as TextNode;
       if (key === 'width' && t.autoResize === 'width') patch.autoResize = 'height';
@@ -202,6 +248,39 @@ function resize(ed: ReturnType<typeof useEditor>, ids: string[], key: 'width' | 
     }
     return patch;
   }, 'Redimensionar', merge);
+}
+
+const BOOLEAN_OPS: { op: BooleanOp; icon: React.ReactNode; tip: string }[] = [
+  { op: 'union', icon: <SquaresUnite size={15} />, tip: 'Unir (Ctrl+Alt+U)' },
+  { op: 'subtract', icon: <SquaresSubtract size={15} />, tip: 'Subtrair (Ctrl+Alt+S)' },
+  { op: 'intersect', icon: <SquaresIntersect size={15} />, tip: 'Interseção (Ctrl+Alt+I)' },
+  { op: 'exclude', icon: <SquaresExclude size={15} />, tip: 'Excluir sobreposição (Ctrl+Alt+X)' },
+];
+
+/** Botões de operação booleana para várias camadas selecionadas. */
+function BooleanBar() {
+  const ed = useEditor('selection');
+  return (
+    <Section title="Operação booleana">
+      <div className="row" style={{ justifyContent: 'space-between' }}>
+        {BOOLEAN_OPS.map((b) => <IconBtn key={b.op} icon={b.icon} tip={b.tip} onClick={() => ed.booleanOperation(b.op)} />)}
+      </div>
+    </Section>
+  );
+}
+
+function BooleanSection({ id, op }: { id: string; op: BooleanOp }) {
+  const ed = useEditor('doc');
+  return (
+    <Section title="Operação booleana">
+      <div className="row">
+        <Seg<BooleanOp> value={op} onChange={(v) => ed.booleanOperation(v)} options={BOOLEAN_OPS.map((b) => ({ value: b.op, label: b.icon, tip: b.tip.split(' (')[0] }))} />
+        <span className="grow" />
+        <IconBtn icon={<Spline size={14} />} tip="Converter em vetor (Ctrl+E)" onClick={() => ed.flatten([id])} />
+      </div>
+      <div className="label" style={{ marginTop: 6 }}>As formas continuam editáveis dentro dela (duplo clique ou painel de camadas).</div>
+    </Section>
+  );
 }
 
 function AlignBar() {
@@ -257,7 +336,7 @@ function CornerField({ nodes }: { nodes: SceneNode[] }) {
 
 function SizingSelect({ nodes, axis, parentLayout }: { nodes: SceneNode[]; axis: 'horizontal' | 'vertical'; parentLayout: boolean }) {
   const ed = useEditor();
-  const canHug = nodes.every((n) => ((n.type === 'frame' || n.type === 'component') && (n as ContainerNode).layout) || n.type === 'text');
+  const canHug = nodes.every((n) => ((n.type === 'frame' || n.type === 'component' || n.type === 'component-set') && (n as ContainerNode).layout) || n.type === 'text');
   const value = common(nodes.map((n) => {
     if (n.type === 'text') {
       const t = n as TextNode;
@@ -402,7 +481,13 @@ function TextSection({ nodes }: { nodes: TextNode[] }) {
   const ed = useEditor('doc');
   const ids = nodes.map((n) => n.id);
   const st = (k: keyof TextStyle) => common(nodes.map((n) => n.style[k]));
-  const setStyle = (patch: Partial<TextStyle>, merge?: string) => ed.setEach(ids, (n) => ({ style: { ...(n as TextNode).style, ...patch } }), 'Texto', merge);
+  // mexer à mão em fonte/tamanho solta o estilo de texto (alinhamento não faz parte do estilo)
+  const setStyle = (patch: Partial<TextStyle>, merge?: string) =>
+    ed.setEach(ids, (n) => {
+      const keepsStyle = Object.keys(patch).every((k) => k === 'align' || k === 'verticalAlign');
+      return { style: { ...(n as TextNode).style, ...patch }, ...(n.styles?.text && !keepsStyle ? detachPatch(n, 'text') : {}) };
+    }, 'Texto', merge);
+  const textStyle = linkedStyle(ed, nodes, 'text');
   const fonts = ed.host?.fonts;
   const family = st('family');
   const families = useMemo(() => fonts?.sortedFamilies().map((f) => f.family) ?? ['Inter'], [fonts, fonts?.families.size]);
@@ -411,7 +496,8 @@ function TextSection({ nodes }: { nodes: TextNode[] }) {
   const WN: Record<number, string> = { 100: 'Fina', 200: 'Extraleve', 300: 'Leve', 350: 'Semileve', 400: 'Regular', 500: 'Média', 600: 'Seminegrito', 700: 'Negrito', 800: 'Extranegrito', 900: 'Black' };
   const missing = typeof family === 'string' && fonts && !fonts.has(family);
   return (
-    <Section title="Texto">
+    <Section title="Texto" actions={<StyleButton nodes={nodes} slot="text" />}>
+      {textStyle && <StyleRow nodes={nodes} slot="text" style={textStyle} />}
       <div className="row">
         <input
           className="select grow"
@@ -487,6 +573,25 @@ function TextSection({ nodes }: { nodes: TextNode[] }) {
           onChange={(v) => setStyle({ case: v === 'none' ? undefined : (v as TextStyle['case']) })}
         />
       </div>
+      {nodes.every((n) => n.textPath) && (
+        <>
+          <div className="row" style={{ marginTop: 8 }}>
+            <span className="label" style={{ width: 70, flex: 'none' }}>No caminho</span>
+            <NumberField
+              className="grow"
+              lead="⇥"
+              title="Onde o texto começa (% do caminho)"
+              unit="%"
+              min={0}
+              max={100}
+              value={common(nodes.map((n) => n.textPath?.start ?? 0)) as Maybe<number>}
+              onChange={(v, o) => ed.setEach(ids, (n) => ({ textPath: { ...(n as TextNode).textPath!, start: Math.max(0, Math.min(100, v)) } }), 'Texto no caminho', o.merge)}
+            />
+            <IconBtn on={nodes.every((n) => n.textPath?.flip)} icon={<FlipVertical2 size={13} />} tip="Letras do outro lado do caminho" onClick={() => ed.setEach(ids, (n) => ({ textPath: { ...(n as TextNode).textPath!, flip: !(n as TextNode).textPath!.flip || undefined } }), 'Texto no caminho')} />
+          </div>
+          <button className="btn small ghost" style={{ marginTop: 6 }} onClick={() => ed.releaseTextPath()}>Soltar do caminho</button>
+        </>
+      )}
     </Section>
   );
 }
@@ -507,9 +612,21 @@ function PaintSection({ nodes, kind }: { nodes: SceneNode[]; kind: 'fills' | 'st
     ]);
   const paintOf = (x: Paint | Stroke): Paint => (kind === 'fills' ? (x as Paint) : (x as Stroke).paint);
   const withPaint = (x: Paint | Stroke, p: Paint): Paint | Stroke => (kind === 'fills' ? p : { ...(x as Stroke), paint: p });
+  const slot = kind === 'fills' ? 'fill' : 'stroke';
+  const style = linkedStyle(ed, nodes, slot);
 
   return (
-    <Section title={title} empty={same && !list.length} actions={<IconBtn icon={<Plus size={14} />} tip={`Adicionar ${title.toLowerCase()}`} onClick={add} />}>
+    <Section
+      title={title}
+      empty={same && !list.length && !style}
+      actions={
+        <>
+          {(same && list.length > 0) || style ? <StyleButton nodes={nodes} slot={slot} /> : null}
+          <IconBtn icon={<Plus size={14} />} tip={`Adicionar ${title.toLowerCase()}`} onClick={add} />
+        </>
+      }
+    >
+      {style && <StyleRow nodes={nodes} slot={slot} style={style} />}
       {!same && (
         <div className="row">
           <span className="muted grow">Vários valores</span>
@@ -518,11 +635,13 @@ function PaintSection({ nodes, kind }: { nodes: SceneNode[]; kind: 'fills' | 'st
       )}
       {[...list].map((x, i) => {
         const p = paintOf(x);
+        // com estilo de cor ligado, só os detalhes do contorno ficam editáveis aqui
+        if (style && kind === 'fills') return null;
         const hidden = p.visible === false || (kind === 'strokes' && (x as Stroke).visible === false);
         const label = p.type === 'solid' ? (p.variable ? findVariable(ed.doc, p.variable)?.variable.name ?? 'variável' : p.color.slice(1, 7).toUpperCase()) : p.type === 'image' ? 'Imagem' : p.type === 'linear' ? 'Linear' : p.type === 'radial' ? 'Radial' : 'Angular';
         return (
           <div key={i}>
-            <div className={`paint-row ${hidden ? 'hidden' : ''}`}>
+            {!(style && kind === 'strokes') && <div className={`paint-row ${hidden ? 'hidden' : ''}`}>
               <div className="field">
                 <span className="lead">
                   <button className="swatch" onClick={(e) => setOpen({ i, rect: e.currentTarget.getBoundingClientRect() })} aria-label="Editar cor">
@@ -553,7 +672,7 @@ function PaintSection({ nodes, kind }: { nodes: SceneNode[]; kind: 'fills' | 'st
               </div>
               <IconBtn icon={hidden ? <EyeOff size={13} /> : <Eye size={13} />} tip={hidden ? 'Mostrar' : 'Ocultar'} onClick={() => update((l) => l.map((y, j) => (j === i ? withPaint(y, { ...p, visible: hidden ? undefined : false }) : y)))} />
               <IconBtn icon={<Minus size={13} />} tip="Remover" onClick={() => update((l) => l.filter((_, j) => j !== i))} />
-            </div>
+            </div>}
             {kind === 'strokes' && (
               <div className="grid2" style={{ marginTop: 4, marginBottom: 6 }}>
                 <NumberField lead="≡" title="Espessura" min={0} value={(x as Stroke).width} onChange={(v, o) => update((l) => l.map((y, j) => (j === i ? { ...(y as Stroke), width: v } : y)), o.merge)} />
@@ -593,12 +712,23 @@ function EffectsSection({ nodes }: { nodes: SceneNode[] }) {
   const same = common(lists.map((l) => JSON.stringify(l))) !== MIXED;
   const list = same ? lists[0] : [];
   const [color, setColor] = useState<{ i: number; rect: DOMRect } | null>(null);
-  const update = (fn: (l: Effect[]) => Effect[], merge?: string) => ed.setEach(ids, (n) => ({ effects: fn(clone(n.effects ?? [])) }), 'Efeitos', merge);
+  const update = (fn: (l: Effect[]) => Effect[], merge?: string) => ed.setEach(ids, (n) => ({ effects: fn(clone(n.effects ?? [])), ...(n.styles?.effect ? detachPatch(n, 'effect') : {}) }), 'Efeitos', merge);
   const add = () => update((l) => [...(same ? l : []), { type: 'drop-shadow', color: '#00000040', x: 0, y: 4, blur: 12 }]);
+  const style = linkedStyle(ed, nodes, 'effect');
   return (
-    <Section title="Efeitos" empty={same && !list.length} actions={<IconBtn icon={<Plus size={14} />} tip="Adicionar efeito" onClick={add} />}>
+    <Section
+      title="Efeitos"
+      empty={same && !list.length}
+      actions={
+        <>
+          {same && (list.length > 0 || style) ? <StyleButton nodes={nodes} slot="effect" /> : null}
+          <IconBtn icon={<Plus size={14} />} tip="Adicionar efeito" onClick={add} />
+        </>
+      }
+    >
+      {style && <StyleRow nodes={nodes} slot="effect" style={style} />}
       {!same && <div className="muted">Vários valores</div>}
-      {list.map((fx, i) => {
+      {!style && list.map((fx, i) => {
         const set = (patch: Partial<Effect>, merge?: string) => update((l) => l.map((e, j) => (j === i ? ({ ...e, ...patch } as Effect) : e)), merge);
         const hidden = fx.visible === false;
         return (
@@ -645,47 +775,20 @@ function EffectsSection({ nodes }: { nodes: SceneNode[] }) {
   );
 }
 
-function InstanceSection({ inst }: { inst: InstanceNode }) {
-  const ed = useEditor('doc');
-  const main = ed.findComponent(inst.componentId, inst.library);
-  const lib = inst.library ? ed.doc.libraries.find((l) => l.id === inst.library) : null;
-  const texts = main ? overridableTexts(main) : [];
-  return (
-    <Section title="Instância">
-      <div className="row" style={{ marginBottom: 8 }}>
-        <Component size={14} style={{ color: 'var(--component)' }} />
-        <span className="grow" style={{ color: 'var(--component)', fontWeight: 500 }}>{main?.name ?? 'Componente ausente'}</span>
-        {lib && <span className="badge">{lib.name}</span>}
-      </div>
-      {!main && <div className="label" style={{ color: 'var(--danger)', marginBottom: 8 }}>O componente desta instância não está mais disponível. Desanexe para manter o conteúdo.</div>}
-      {texts.map((t) => (
-        <div key={t.id} style={{ marginBottom: 6 }}>
-          <div className="label" style={{ marginBottom: 3 }}>{t.name}</div>
-          <TextField value={inst.overrides?.[t.id]?.text ?? t.text} onChange={(v) => ed.setOverride(inst.id, t.id, { text: v })} />
-        </div>
-      ))}
-      <div className="row" style={{ marginTop: 8, flexWrap: 'wrap' }}>
-        {!inst.library && main && <button className="btn small" onClick={() => ed.goToMainComponent()}><CornerUpLeft size={12} /> Principal</button>}
-        <button className="btn small" onClick={() => ed.resetOverrides()} disabled={!inst.overrides || !Object.keys(inst.overrides).length}>Restaurar</button>
-        <button className="btn small" onClick={() => ed.detach()}><Unlink size={12} /> Desanexar</button>
-      </div>
-    </Section>
-  );
-}
-
 function ExportSection() {
   const ed = useEditor('selection');
   const [scale, setScale] = useState(2);
-  const [format, setFormat] = useState<'png' | 'jpg' | 'webp' | 'svg'>('png');
+  const [format, setFormat] = useState<'png' | 'jpg' | 'webp' | 'svg' | 'pdf'>('png');
   return (
     <Section title="Exportar" collapsible defaultOpen={false}>
       <div className="grid2">
         <Select value={scale} options={[0.5, 1, 1.5, 2, 3, 4].map((s) => ({ value: s, label: `${s}×` }))} onChange={setScale} />
-        <Select value={format} options={[{ value: 'png', label: 'PNG' }, { value: 'jpg', label: 'JPG' }, { value: 'webp', label: 'WebP' }, { value: 'svg', label: 'SVG' }]} onChange={setFormat} />
+        <Select value={format} options={[{ value: 'png', label: 'PNG' }, { value: 'jpg', label: 'JPG' }, { value: 'webp', label: 'WebP' }, { value: 'svg', label: 'SVG' }, { value: 'pdf', label: 'PDF' }]} onChange={setFormat} />
       </div>
       <button className="btn block" style={{ marginTop: 8 }} onClick={() => ed.exportSelection(format, scale)}>
         <Download size={13} /> Exportar {ed.selection.length > 1 ? `${ed.selection.length} camadas` : 'seleção'}
       </button>
+      {format === 'pdf' && <div className="label" style={{ marginTop: 6 }}>Uma página por camada, no tamanho dela. A escala define a nitidez.</div>}
     </Section>
   );
 }

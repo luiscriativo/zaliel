@@ -1,19 +1,21 @@
 import { useEffect, useRef, useState } from 'react';
-import { Minus, Plus } from 'lucide-react';
+import { Minus, Plus, ClipboardPaste } from 'lucide-react';
 import { apply, multiply, nodeMatrix, parseHex, type Mat, type SceneNode, type TextNode } from '@zaliel/core';
 import type { Editor } from '../editor';
 import { useEditor } from './hooks';
 import { Interaction, findResolved } from '../engine/interaction';
-import { Menu } from './Menu';
+import { Menu, type MenuEntry } from './Menu';
+import { keyLabel } from './commands';
 import { LAYER_MENU } from './LeftPanel';
 import { blobToBase64 } from '../editor';
+import { CommentLayer } from './Comments';
 
 export function CanvasView({ ready }: { ready: boolean }) {
   const ed = useEditor('view', 'tool', 'ui');
   const stageRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [editing, setEditing] = useState<string | null>(null);
-  const [menu, setMenu] = useState<{ x: number; y: number; empty: boolean } | null>(null);
+  const [menu, setMenu] = useState<{ x: number; y: number; empty: boolean; at: { x: number; y: number } } | null>(null);
   const [dragOver, setDragOver] = useState(false);
 
   useEffect(() => {
@@ -62,9 +64,16 @@ export function CanvasView({ ready }: { ready: boolean }) {
     }
     const files = [...e.dataTransfer.files];
     const zal = files.find((f) => /\.zal$/i.test(f.name));
+    const pathOf = (f: File) => (window as unknown as { zaliel?: { pathForFile?: (f: File) => string } }).zaliel?.pathForFile?.(f);
     if (zal) {
-      const path = (window as unknown as { zaliel?: { pathForFile?: (f: File) => string } }).zaliel?.pathForFile?.(zal);
-      if (path && (await ed.confirmDiscard())) ed.openPath(path);
+      const path = pathOf(zal);
+      if (path) ed.openPath(path);
+      return;
+    }
+    const other = files.find((f) => /\.(fig|pen)$/i.test(f.name));
+    if (other) {
+      const path = pathOf(other);
+      if (path) ed.importDesign(path);
       return;
     }
     const imgs = files.filter((f) => /^image\/(png|jpe?g|gif|webp|bmp|svg\+xml)$/.test(f.type));
@@ -86,7 +95,8 @@ export function CanvasView({ ready }: { ready: boolean }) {
         if (ed.home) return;
         const hit = ed.hover;
         if (hit && !ed.selection.includes(hit)) ed.select([hit]);
-        setMenu({ x: e.clientX, y: e.clientY, empty: !hit && !ed.selection.length });
+        const r = stageRef.current!.getBoundingClientRect();
+        setMenu({ x: e.clientX, y: e.clientY, empty: !hit && !ed.selection.length, at: ed.screenToWorld({ x: e.clientX - r.left, y: e.clientY - r.top }) });
       }}
       onDragOver={(e) => {
         if ([...e.dataTransfer.types].some((t) => t === 'Files' || t === 'application/x-zaliel-component')) {
@@ -101,13 +111,21 @@ export function CanvasView({ ready }: { ready: boolean }) {
       {!ready && <div className="loading">Preparando o canvas…</div>}
       {dragOver && <div className="drop-hint">Solte para importar</div>}
       {editing && <TextEditor id={editing} onDone={() => setEditing(null)} />}
+      {ready && <CommentLayer />}
       {ready && <ZoomPill />}
       {menu && (
         <Menu
           x={menu.x}
           y={menu.y}
           onClose={() => setMenu(null)}
-          items={menu.empty ? ['edit.paste', '-', 'edit.selectAll', 'view.fit', '-', 'file.import', 'view.pixelGrid'] : LAYER_MENU}
+          contextual
+          items={(() => {
+            // "Colar aqui": cola onde o botão direito foi clicado
+            const pasteHere: MenuEntry = { label: 'Colar aqui', icon: <ClipboardPaste size={14} />, run: () => void ed.paste(menu.at), kbd: keyLabel('Mod+V') };
+            return menu.empty
+              ? [pasteHere, '-', 'edit.selectAll', 'view.fit', '-', 'file.import', 'view.pixelGrid', 'view.comments']
+              : LAYER_MENU.flatMap((it) => (it === 'edit.paste' ? [pasteHere] : [it]));
+          })()}
         />
       )}
     </div>
@@ -117,7 +135,7 @@ export function CanvasView({ ready }: { ready: boolean }) {
 function ZoomPill() {
   const ed = useEditor('view');
   return (
-    <div className="zoom-pill">
+    <div className="zoom-pill" data-no-canvas>
       <button onClick={() => ed.zoomAt(1 / 1.5)} aria-label="Afastar"><Minus size={12} /></button>
       <button onClick={() => ed.zoomTo(1)} title="Voltar para 100%" style={{ minWidth: 48 }}>{Math.round(ed.viewport.zoom * 100)}%</button>
       <button onClick={() => ed.zoomAt(1.5)} aria-label="Aproximar"><Plus size={12} /></button>
@@ -180,6 +198,7 @@ function TextEditor({ id, onDone }: { id: string; onDone: () => void }) {
     <textarea
       ref={ref}
       className={`text-editor ${autoW ? '' : 'wrap'}`}
+      data-no-canvas
       spellCheck={false}
       defaultValue={node.text}
       style={{

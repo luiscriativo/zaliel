@@ -20,7 +20,6 @@ venv/
 # ── Dados de demonstração / testes locais ────────────────────────────────────
 demo-data/
 coverage/
-# [AJUSTE] dados de usuário que o app gera e nunca devem ir ao repositório
 
 # ── Sistema operacional ──────────────────────────────────────────────────────
 .DS_Store

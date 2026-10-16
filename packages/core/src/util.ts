@@ -133,10 +133,12 @@ export function rotate(deg: number): Mat {
 }
 
 /** Transformação local de um nó: posição + rotação em torno do centro. */
-export function nodeMatrix(n: { x: number; y: number; width: number; height: number; rotation?: number }): Mat {
-  if (!n.rotation) return translate(n.x, n.y);
+export function nodeMatrix(n: { x: number; y: number; width: number; height: number; rotation?: number; flipX?: boolean; flipY?: boolean }): Mat {
+  if (!n.rotation && !n.flipX && !n.flipY) return translate(n.x, n.y);
   const cx = n.width / 2, cy = n.height / 2;
-  return multiply(translate(n.x + cx, n.y + cy), multiply(rotate(n.rotation), translate(-cx, -cy)));
+  // espelhar em torno do centro: a caixa continua no mesmo lugar
+  const flip: Mat = [n.flipX ? -1 : 1, 0, 0, n.flipY ? -1 : 1, 0, 0];
+  return multiply(translate(n.x + cx, n.y + cy), multiply(rotate(n.rotation ?? 0), multiply(flip, translate(-cx, -cy))));
 }
 
 export function rectCorners(r: Rect): Point[] {

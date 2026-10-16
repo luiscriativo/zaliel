@@ -7,8 +7,11 @@ import { DesignPanel } from './DesignPanel';
 import { CanvasView } from './CanvasView';
 import { Home } from './Home';
 import { Dialogs } from './Dialogs';
+import { Presentation } from './Present';
+import { TabBar } from './Tabs';
 import { comboOf, findCommand, TOOL_KEYS } from './commands';
 import { CanvasHost, type HostAssets } from '../engine/host';
+import { createAutomation } from '../automation';
 import type { Editor } from '../editor';
 
 export function App({ assets }: { assets: HostAssets }) {
@@ -25,7 +28,12 @@ export function App({ assets }: { assets: HostAssets }) {
         if (!alive) return;
         ed.host = host;
         ed.model.measureText = host.measureText;
-        ed.model.refreshLayout();
+        ed.relayoutAfterFonts();
+        // automação local: só atende se o usuário ligou nas preferências (o servidor fica no processo principal)
+        if (ed.platform.automation) {
+          const automation = createAutomation(ed);
+          ed.platform.automation.serve((payload) => automation.handle(payload as Parameters<typeof automation.handle>[0]));
+        }
         host.onFontsChanged = () => ed.emit('ui');
         setReady(true);
       })
@@ -51,14 +59,9 @@ export function App({ assets }: { assets: HostAssets }) {
   // eventos do sistema
   useEffect(() => {
     const offs = [
-      ed.platform.on('open-path', async (path) => {
-        if (await ed.confirmDiscard()) ed.openPath(path);
-      }),
+      ed.platform.on('open-path', (path) => ed.openPath(path)),
       ed.platform.on('close-requested', async () => {
-        if (await ed.confirmDiscard()) {
-          await ed.platform.clearRecovery(ed.doc.id);
-          ed.platform.confirmClose();
-        }
+        if (await ed.confirmCloseAll()) ed.platform.confirmClose();
       }),
     ];
     // cópia de segurança a cada 20 s quando há alterações
@@ -84,8 +87,9 @@ export function App({ assets }: { assets: HostAssets }) {
   }
 
   return (
-    <div className="app">
+    <div className={`app ${ed.home ? '' : 'with-tabs'}`}>
       <TitleBar />
+      {!ed.home && <TabBar />}
       {ed.home ? (
         <Home />
       ) : (
@@ -98,6 +102,7 @@ export function App({ assets }: { assets: HostAssets }) {
       <StatusBar />
       <Toasts />
       <Dialogs />
+      {ed.presenting && <Presentation />}
     </div>
   );
 }
@@ -106,13 +111,16 @@ function StatusBar() {
   const ed = useEditor('selection', 'view', 'doc', 'tool');
   const it = ed.host?.interaction;
   const p = it?.world;
-  const names: Record<string, string> = { move: 'Mover', hand: 'Mão', frame: 'Frame', rect: 'Retângulo', ellipse: 'Elipse', line: 'Linha', polygon: 'Polígono', star: 'Estrela', text: 'Texto', pen: 'Caneta' };
+  const names: Record<string, string> = { move: 'Mover', hand: 'Mão', frame: 'Frame', rect: 'Retângulo', ellipse: 'Elipse', line: 'Linha', polygon: 'Polígono', star: 'Estrela', text: 'Texto', pen: 'Caneta', comment: 'Comentário — clique no canvas para comentar' };
   return (
     <footer className="statusbar">
-      <span className="offline" title="O Zaliel não se conecta à internet"><i /> Offline</span>
       {!ed.home && (
         <>
-          <span>{names[ed.tool]}{ed.tool === 'pen' ? ' — clique para pontos, arraste para curvas, Enter para terminar' : ''}</span>
+          <span>
+            {ed.vectorEdit
+              ? 'Editando pontos — arraste pontos e alças, clique na linha para adicionar, duplo clique alterna canto/curva, Delete apaga, Esc sai'
+              : `${names[ed.tool]}${ed.tool === 'pen' ? ' — clique para pontos, arraste para curvas, Enter para terminar' : ''}`}
+          </span>
           {p && <span>X {Math.round(p.x)} · Y {Math.round(p.y)}</span>}
           <span>{ed.selection.length ? `${ed.selection.length} selecionada${ed.selection.length > 1 ? 's' : ''}` : ''}</span>
           <span className="spacer" />
@@ -140,6 +148,7 @@ function Toasts() {
 function ToastItem({ t, ed }: { t: Editor['toasts'][number]; ed: Editor }) {
   const hover = useRef(false);
   useEffect(() => {
+    if (t.sticky) return;
     const ms = t.kind === 'error' ? 10000 : t.kind === 'warn' ? 7000 : 4000;
     let left = ms;
     const iv = setInterval(() => {
@@ -171,6 +180,12 @@ function useKeyboard(ed: Editor) {
     const down = (e: KeyboardEvent) => {
       const t = e.target as HTMLElement;
       const typing = t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || t.isContentEditable);
+      // Ctrl+Tab troca de aba em qualquer sistema
+      if (e.ctrlKey && e.key === 'Tab') {
+        e.preventDefault();
+        ed.cycleTab(e.shiftKey ? -1 : 1);
+        return;
+      }
       const combo = comboOf(e);
       const c = findCommand(combo);
       // em campos de texto só passam os atalhos com Ctrl/⌘ de arquivo
@@ -182,7 +197,8 @@ function useKeyboard(ed: Editor) {
         }
         return;
       }
-      if (ed.dialog) return;
+      // o painel de localizar não bloqueia os atalhos do canvas
+      if ((ed.dialog && ed.dialog !== 'find') || ed.presenting) return;
       if (e.key === ' ' && !e.repeat && ed.host?.interaction) {
         ed.host.interaction.space = true;
         e.preventDefault();
@@ -196,6 +212,25 @@ function useKeyboard(ed: Editor) {
         return;
       }
       const it = ed.host?.interaction;
+      // modo de edição de pontos
+      if (ed.vectorEdit && it) {
+        if (e.key === 'Escape' || (e.key === 'Enter' && !e.ctrlKey && !e.metaKey)) {
+          e.preventDefault();
+          ed.exitVectorEdit();
+          return;
+        }
+        if ((e.key === 'Delete' || e.key === 'Backspace') && it.vector.selected.length) {
+          e.preventDefault();
+          it.vector.deleteSelected();
+          return;
+        }
+        if (e.key.startsWith('Arrow') && it.vector.selected.length) {
+          e.preventDefault();
+          const d = e.shiftKey ? ed.settings.bigNudge : ed.settings.nudge;
+          it.vector.nudge(e.key === 'ArrowLeft' ? -d : e.key === 'ArrowRight' ? d : 0, e.key === 'ArrowUp' ? -d : e.key === 'ArrowDown' ? d : 0);
+          return;
+        }
+      }
       if (e.key === 'Escape') {
         if (it?.cancel()) return;
         if (ed.tool !== 'move') return ed.setTool('move');
@@ -215,6 +250,8 @@ function useKeyboard(ed: Editor) {
           if (parent && ed.model.index.get(parent)) ed.select([parent]);
         } else if (sel.length === 1 && sel[0].type === 'text') {
           window.dispatchEvent(new CustomEvent('zaliel:edit-text', { detail: sel[0].id }));
+        } else if (sel.length === 1 && sel[0].type === 'path') {
+          ed.enterVectorEdit(sel[0].id);
         } else {
           const kids = sel.flatMap((n) => ('children' in n ? n.children.map((k) => k.id) : []));
           if (kids.length) ed.select(kids);

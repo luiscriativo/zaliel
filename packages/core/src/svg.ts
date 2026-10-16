@@ -116,7 +116,8 @@ function filterFor(ctx: SvgCtx, effects: Effect[] | undefined): string {
 function nodeToSvg(ctx: SvgCtx, n: SceneNode, resolve: (n: SceneNode) => SceneNode): string {
   if (n.visible === false) return '';
   n = resolve(n);
-  const tf = `translate(${n.x} ${n.y})${n.rotation ? ` rotate(${n.rotation} ${n.width / 2} ${n.height / 2})` : ''}`;
+  const flip = n.flipX || n.flipY ? ` translate(${n.width / 2} ${n.height / 2}) scale(${n.flipX ? -1 : 1} ${n.flipY ? -1 : 1}) translate(${-n.width / 2} ${-n.height / 2})` : '';
+  const tf = `translate(${n.x} ${n.y})${n.rotation ? ` rotate(${n.rotation} ${n.width / 2} ${n.height / 2})` : ''}${flip}`;
   const op = n.opacity !== undefined && n.opacity < 1 ? ` opacity="${n.opacity}"` : '';
   const filter = filterFor(ctx, n.effects);
   let body = '';
@@ -128,8 +129,18 @@ function nodeToSvg(ctx: SvgCtx, n: SceneNode, resolve: (n: SceneNode) => SceneNo
     const lh = typeof st.lineHeight === 'number' ? st.lineHeight : st.size * 1.25;
     const anchor = st.align === 'center' ? 'middle' : st.align === 'right' ? 'end' : 'start';
     const ax = st.align === 'center' ? n.width / 2 : st.align === 'right' ? n.width : 0;
-    const lines = n.text.split('\n').map((l, i) => `<tspan x="${ax}" y="${(i + 0.8) * lh}">${esc(l)}</tspan>`).join('');
-    body = `<text font-family="${esc(st.family)}" font-size="${st.size}" font-weight="${st.weight}"${st.italic ? ' font-style="italic"' : ''}${st.letterSpacing ? ` letter-spacing="${st.letterSpacing}"` : ''} text-anchor="${anchor}" ${fill}>${lines}</text>`;
+    let lines = n.text.split('\n').map((l, i) => `<tspan x="${ax}" y="${(i + 0.8) * lh}">${esc(l)}</tspan>`).join('');
+    let pathAnchor = anchor;
+    if (n.textPath) {
+      // texto em caminho: <textPath> apontando para a curva nas definições
+      const id = `z${ctx.n++}`;
+      ctx.defs.push(`<path id="${id}" d="${esc(n.textPath.d)}"/>`);
+      const start = n.textPath.start ?? 0;
+      const offset = st.align === 'center' ? 50 + start : st.align === 'right' ? 100 : start;
+      lines = `<textPath href="#${id}" startOffset="${offset}%"${n.textPath.flip ? ' side="right"' : ''}>${esc(n.text.replace(/\n/g, ' '))}</textPath>`;
+      pathAnchor = anchor;
+    }
+    body = `<text font-family="${esc(st.family)}" font-size="${st.size}" font-weight="${st.weight}"${st.italic ? ' font-style="italic"' : ''}${st.letterSpacing ? ` letter-spacing="${st.letterSpacing}"` : ''} text-anchor="${pathAnchor}" ${fill}>${lines}</text>`;
   } else {
     for (const f of fills) body += shapeElement(n, paintAttr(ctx, f, n, 'fill'));
     if ('children' in n && n.children.length) {

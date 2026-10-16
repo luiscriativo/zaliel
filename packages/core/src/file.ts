@@ -10,7 +10,7 @@ export const EXTENSION = 'zal';
 const hex = z.string().regex(/^#([0-9a-f]{6}|[0-9a-f]{8})$/i, 'cor inválida (use #rrggbb ou #rrggbbaa)');
 const num = z.number().refine(Number.isFinite, 'número inválido');
 
-const nodeTypes = ['frame', 'group', 'rect', 'ellipse', 'line', 'polygon', 'star', 'path', 'text', 'component', 'instance'] as const;
+const nodeTypes = ['frame', 'group', 'rect', 'ellipse', 'line', 'polygon', 'star', 'path', 'text', 'component', 'component-set', 'boolean', 'instance'] as const;
 
 const NodeSchema: z.ZodType<unknown> = z.lazy(() =>
   z.looseObject({
@@ -41,7 +41,10 @@ const DocumentSchema = z.looseObject({
   name: z.string(),
   pages: z.array(PageSchema).min(1),
   variables: z.array(z.any()).default([]),
+  styles: z.array(z.looseObject({ id: z.string().min(1), name: z.string(), type: z.enum(['color', 'text', 'effect']) })).optional(),
   libraries: z.array(z.any()).default([]),
+  comments: z.array(z.looseObject({ id: z.string().min(1), pageId: z.string(), x: num, y: num, text: z.string() })).optional(),
+  versions: z.array(z.looseObject({ id: z.string().min(1), name: z.string(), createdAt: num, data: z.string() })).optional(),
   assets: z.record(z.string(), z.looseObject({ mime: z.string(), data: z.string() })).default({}),
 });
 
@@ -51,12 +54,21 @@ export class FileFormatError extends Error {
   }
 }
 
+/** A partir de quantas camadas o arquivo é gravado compacto (sem indentação). */
+export const COMPACT_FROM = 40000;
+
 /** Converte um documento para o texto do arquivo .zal. */
 export function serialize(doc: ZalDocument): string {
   // ordem fixa das chaves de topo: o conteúdo de design primeiro, as imagens por último
-  const { format, version, id, name, settings, pages, variables, libraries, meta, assets } = doc;
-  const ordered = { format, version, id, name, settings, pages, variables, libraries, meta, assets };
-  return JSON.stringify(ordered, null, 2) + '\n';
+  const { format, version, id, name, settings, pages, variables, styles, libraries, meta, comments, versions, assets } = doc;
+  const ordered = { format, version, id, name, settings, pages, variables, styles, libraries, meta, comments: comments?.length ? comments : undefined, versions: versions?.length ? versions : undefined, assets };
+  // arquivos enormes ficam compactos: com indentação passariam do tamanho máximo de texto
+  let count = 0;
+  for (const p of pages) {
+    walk(p.children, () => void count++);
+    if (count > COMPACT_FROM) break;
+  }
+  return JSON.stringify(ordered, null, count > COMPACT_FROM ? undefined : 2) + '\n';
 }
 
 /** Lê o texto de um .zal, valida, migra versões antigas e devolve o documento. */
@@ -112,11 +124,15 @@ export function hashText(text: string): string {
   return (h >>> 0).toString(16).padStart(8, '0');
 }
 
-/** Componentes que um arquivo publica como biblioteca (todos os componentes do arquivo). */
+/** Componentes que um arquivo publica como biblioteca: componentes soltos e conjuntos de variantes (com as variantes dentro). */
 export function publishedComponents(doc: ZalDocument): ContainerNode[] {
   const out: ContainerNode[] = [];
   for (const p of doc.pages) walk(p.children, (n) => {
     if (n.type === 'component') out.push(n);
+    if (n.type === 'component-set') {
+      out.push(n);
+      return false; // as variantes vão dentro do conjunto
+    }
   });
   return out;
 }
@@ -130,6 +146,7 @@ export function buildLibrary(source: ZalDocument, path: string): LinkedLibrary {
     for (const f of [...(n.fills ?? []), ...(n.strokes ?? []).map((s) => s.paint)]) if (f.type === 'image') used.add(f.asset);
   });
   const assets = Object.fromEntries(Object.entries(source.assets).filter(([k]) => used.has(k)));
-  const payload = JSON.stringify({ components, variables: source.variables });
-  return { id: source.id, name: source.name, path, hash: hashText(payload), components, variables: source.variables, assets };
+  const styles = source.styles ?? [];
+  const payload = JSON.stringify({ components, variables: source.variables, ...(styles.length ? { styles } : {}) });
+  return { id: source.id, name: source.name, path, hash: hashText(payload), components, variables: source.variables, ...(styles.length ? { styles } : {}), assets };
 }

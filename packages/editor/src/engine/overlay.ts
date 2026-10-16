@@ -1,7 +1,9 @@
 // Camada por cima do desenho: seleção, alças, guias, nomes dos frames, medidas e caneta.
-import type { Canvas, CanvasKit, Paragraph } from 'canvaskit-wasm';
-import { apply, parseHex, rectCorners, type Point, type SceneNode } from '@zaliel/core';
+import type { Canvas, CanvasKit, Paint as SkPaint, Paragraph } from 'canvaskit-wasm';
+import { apply, multiply, parseHex, rectCorners, gridBands, gridLines, prototypeLinks, startScreen, walk, type Mat, type Point, type Rect, type SceneNode } from '@zaliel/core';
+import { toSkMatrix } from '@zaliel/renderer';
 import type { CanvasHost } from './host';
+import { RULER } from './interaction';
 
 const SEL = '#b5822f';
 const COMPONENT = '#7d5ba6';
@@ -78,7 +80,36 @@ export function drawOverlay(host: CanvasHost, canvas: Canvas, ck: CanvasKit): vo
     const m = ed.model.index.worldMatrix(id);
     return rectCorners({ x: 0, y: 0, width: n.width, height: n.height }).map((p) => ed.worldToScreen(apply(m, p)));
   };
-  const colorFor = (n: SceneNode | undefined) => (n && (n.type === 'component' || n.type === 'instance') ? COMPONENT : SEL);
+  const colorFor = (n: SceneNode | undefined) => (n && (n.type === 'component' || n.type === 'instance' || n.type === 'component-set') ? COMPONENT : SEL);
+  const size = host.size();
+  const view: Mat = [z, 0, 0, z, ed.viewport.x, ed.viewport.y];
+
+  // grades de layout dos frames (debaixo de tudo o que é interface)
+  if (ed.settings.layoutGrids) {
+    walk(ed.page.children, (n) => {
+      if (n.visible === false) return false;
+      if (!('grids' in n) || !n.grids?.length) return;
+      const m = multiply(view, ed.model.index.worldMatrix(n.id));
+      canvas.save();
+      canvas.concat(toSkMatrix(m));
+      canvas.clipRect(ck.LTRBRect(0, 0, n.width, n.height), ck.ClipOp.Intersect, true);
+      const k = Math.hypot(m[0], m[1]) || 1;
+      for (const g of n.grids) {
+        if (g.visible === false) continue;
+        if (g.type === 'grid') {
+          const l = gridLines(g, n.width, n.height);
+          if (g.size * k < 4) continue; // pequena demais para enxergar
+          const p = stroke(g.color, 1 / k);
+          for (const x of l.xs) canvas.drawLine(x, 0, x, n.height, p);
+          for (const y of l.ys) canvas.drawLine(0, y, n.width, y, p);
+        } else {
+          const p = fill(g.color);
+          for (const b of gridBands(g, n.width, n.height)) canvas.drawRect(ck.XYWHRect(b.x, b.y, b.width, b.height), p);
+        }
+      }
+      canvas.restore();
+    });
+  }
 
   // grade de pixels em zoom alto
   if (ed.settings.pixelGrid && z >= 8) {
@@ -95,17 +126,20 @@ export function drawOverlay(host: CanvasHost, canvas: Canvas, ck: CanvasKit): vo
     }
   }
 
-  // nomes dos frames do topo
+  // nomes dos frames do topo (a área de cada um fica guardada para dar para clicar nele)
+  host.frameLabels = [];
   for (const n of ed.page.children) {
-    if (n.visible === false || !('children' in n) || n.type === 'group') continue;
+    if (n.visible === false || !('children' in n) || n.type === 'group' || n.type === 'boolean') continue;
     const q = quadOf(n.id);
     if (!q) continue;
     const selected = ed.selection.includes(n.id);
-    const color = n.type === 'component' ? COMPONENT : selected ? SEL : darkBg ? '#a8a399' : '#7a746a';
-    const name = n.type === 'component' ? `◇ ${n.name}` : n.name;
+    const comp = n.type === 'component' || n.type === 'component-set';
+    const color = comp ? COMPONENT : selected ? SEL : darkBg ? '#a8a399' : '#7a746a';
+    const name = n.type === 'component' ? `◇ ${n.name}` : n.type === 'component-set' ? `❖ ${n.name}` : n.name;
     const p = label(host, name, color, 11, selected ? 600 : 500);
     const maxW = Math.max(20, Math.hypot(q[1].x - q[0].x, q[1].y - q[0].y));
     if (maxW < 30) continue;
+    if (!n.locked) host.frameLabels.push({ id: n.id, x: q[0].x, y: q[0].y, width: Math.min(maxW, Math.ceil(p.getMaxIntrinsicWidth()) + 4), angle: n.rotation ?? 0 });
     canvas.save();
     canvas.translate(q[0].x, q[0].y);
     canvas.rotate(((n.rotation ?? 0)), 0, 0);
@@ -135,7 +169,7 @@ export function drawOverlay(host: CanvasHost, canvas: Canvas, ck: CanvasKit): vo
     const q = quadOf(id);
     if (q) poly(q, stroke(colorFor(ed.model.index.get(id)), 1));
   }
-  if (sel.length && it && !ed.editingText && ed.tool === 'move') {
+  if (sel.length && it && !ed.editingText && ed.tool === 'move' && !ed.vectorEdit) {
     const quad = it.selectionQuad();
     const moving = it.drag?.kind === 'move' || it.drag?.kind === 'reorder';
     if (quad) {
@@ -239,7 +273,203 @@ export function drawOverlay(host: CanvasHost, canvas: Canvas, ck: CanvasKit): vo
     }
   }
 
+  // guias da página
+  const guides = ed.page.guides ?? [];
+  const gd = it?.drag?.kind === 'guide' ? it.drag : null;
+  if (guides.length || gd) {
+    const gp = stroke(GUIDE, 1);
+    const line = (axis: 'x' | 'y', at: number) => {
+      const s = ed.worldToScreen({ x: at, y: at });
+      if (axis === 'x') canvas.drawLine(Math.round(s.x) + 0.5, 0, Math.round(s.x) + 0.5, size.height, gp);
+      else canvas.drawLine(0, Math.round(s.y) + 0.5, size.width, Math.round(s.y) + 0.5, gp);
+    };
+    guides.forEach((g, i) => gd?.index !== i && line(g.axis, g.at));
+    if (gd) {
+      line(gd.axis, gd.at);
+      const s = ed.worldToScreen({ x: gd.at, y: gd.at });
+      const p = label(host, fmt(gd.at).toString(), '#ffffff', 10.5);
+      const tw = Math.ceil(p.getMaxIntrinsicWidth()) + 10;
+      const x = gd.axis === 'x' ? s.x + 6 : (it?.pointer.x ?? 0) + 12;
+      const y = gd.axis === 'y' ? s.y + 6 : (it?.pointer.y ?? 0) + 12;
+      canvas.drawRRect(ck.RRectXY(ck.LTRBRect(x, y, x + tw, y + 17), 3, 3), fill(GUIDE));
+      canvas.drawParagraph(p, x + 5, y + 2);
+    }
+  }
+
+  // pontos e alças do vetor em edição
+  if (ed.vectorEdit && it) {
+    const vt = it.vector;
+    const node = vt.node();
+    if (node) {
+      const m = vt.matrix();
+      const s = (p: Point) => ed.worldToScreen(apply(m, p));
+      const subs = vt.subpaths();
+      const b = new ck.PathBuilder();
+      for (const sp of subs) {
+        const pts = sp.points;
+        if (!pts.length) continue;
+        const a0 = s(pts[0]);
+        b.moveTo(a0.x, a0.y);
+        const seg = (a: (typeof pts)[number], c: (typeof pts)[number]) => {
+          const o = s(a.out ?? a), i2 = s(c.in ?? c), e = s(c);
+          b.cubicTo(o.x, o.y, i2.x, i2.y, e.x, e.y);
+        };
+        for (let i = 1; i < pts.length; i++) seg(pts[i - 1], pts[i]);
+        if (sp.closed && pts.length > 1) {
+          seg(pts[pts.length - 1], pts[0]);
+          b.close();
+        }
+      }
+      const outline = b.detachAndDelete();
+      canvas.drawPath(outline, stroke(SEL, 1.25));
+      outline.delete();
+      // segmento sob o cursor (clique adiciona um ponto)
+      const hv = vt.hover;
+      if (hv?.kind === 'segment') {
+        const sp = subs[hv.sub];
+        const a = sp?.points[hv.index], c = sp?.points[(hv.index + 1) % (sp?.points.length ?? 1)];
+        if (a && c) {
+          const hb = new ck.PathBuilder();
+          const a1 = s(a), o = s(a.out ?? a), i2 = s(c.in ?? c), e = s(c);
+          hb.moveTo(a1.x, a1.y).cubicTo(o.x, o.y, i2.x, i2.y, e.x, e.y);
+          const hp = hb.detachAndDelete();
+          canvas.drawPath(hp, stroke(SEL, 2.5));
+          hp.delete();
+        }
+      }
+      const hf = fill('#ffffff'), hs = stroke(SEL, 1), hl = stroke(SEL, 1, 0.7), on = fill(SEL);
+      for (const ref of vt.handleOwners(subs)) {
+        const p = subs[ref.sub]?.points[ref.index];
+        if (!p) continue;
+        const c = s(p);
+        for (const h of [p.in, p.out]) if (h) {
+          const hp = s(h);
+          canvas.drawLine(c.x, c.y, hp.x, hp.y, hl);
+          canvas.drawCircle(hp.x, hp.y, 3.5, hf);
+          canvas.drawCircle(hp.x, hp.y, 3.5, hs);
+        }
+      }
+      for (const [si, sp] of subs.entries()) for (const [i, p] of sp.points.entries()) {
+        const c = s(p);
+        const big = hv?.kind === 'anchor' && hv.sub === si && hv.index === i ? 4.5 : 3.5;
+        const r = ck.LTRBRect(c.x - big, c.y - big, c.x + big, c.y + big);
+        canvas.drawRect(r, vt.isSelected(si, i) ? on : hf);
+        canvas.drawRect(r, hs);
+      }
+    }
+  }
+
+  // ligações do protótipo
+  if (ed.rightTab === 'prototype') {
+    const start = startScreen(ed.page);
+    if (start) {
+      const q = quadOf(start.id);
+      if (q) {
+        const p = label(host, '▶ Início', '#ffffff', 10.5, 600);
+        const tw = Math.ceil(p.getMaxIntrinsicWidth()) + 10;
+        const x = q[0].x, y = q[0].y - 40;
+        canvas.drawRRect(ck.RRectXY(ck.LTRBRect(x, y, x + tw, y + 17), 3, 3), fill(SEL));
+        canvas.drawParagraph(p, x + 5, y + 2);
+      }
+    }
+    for (const link of prototypeLinks(ed.page)) {
+      const fromB = screenRect(ed, link.from), toB = screenRect(ed, link.to);
+      if (!fromB || !toB) continue;
+      const active = ed.selection.includes(link.from) || ed.selection.includes(link.to);
+      const forward = toB.x >= fromB.x + fromB.width / 2;
+      const a = { x: forward ? fromB.x + fromB.width : fromB.x, y: fromB.y + fromB.height / 2 };
+      const e = { x: forward ? toB.x : toB.x + toB.width, y: toB.y + Math.min(toB.height / 2, 60) };
+      const dx = Math.max(40, Math.abs(e.x - a.x) / 2) * (forward ? 1 : -1);
+      const pb = new ck.PathBuilder();
+      pb.moveTo(a.x, a.y).cubicTo(a.x + dx, a.y, e.x - dx, e.y, e.x, e.y);
+      const path = pb.detachAndDelete();
+      const line = stroke(SEL, active ? 2 : 1.25, active ? 1 : 0.55);
+      // sobreposições (modais) em tracejado
+      const dash = link.interaction.action === 'overlay' ? ck.PathEffect.MakeDash([6, 4], 0) : null;
+      if (dash) line.setPathEffect(dash);
+      canvas.drawPath(path, line);
+      if (dash) {
+        line.setPathEffect(null);
+        dash.delete();
+      }
+      path.delete();
+      canvas.drawCircle(a.x, a.y, 3.5, fill(SEL, active ? 1 : 0.6));
+      const dir = forward ? -1 : 1;
+      poly([e, { x: e.x + dir * 8, y: e.y - 4.5 }, { x: e.x + dir * 8, y: e.y + 4.5 }], fill(SEL, active ? 1 : 0.6));
+    }
+  }
+
+  // réguas
+  if (ed.settings.rulers) drawRulers(host, canvas, ck, fill, stroke);
+
   for (const p of paints) p.delete();
+}
+
+/** Caixa de um nó em px de tela. */
+function screenRect(ed: CanvasHost['editor'], id: string): Rect | null {
+  if (!ed.model.index.get(id)) return null;
+  const b = ed.worldBounds(id);
+  const a = ed.worldToScreen({ x: b.x, y: b.y });
+  return { x: a.x, y: a.y, width: b.width * ed.viewport.zoom, height: b.height * ed.viewport.zoom };
+}
+
+type PaintFn = (color: string, alpha?: number) => SkPaint;
+
+/** Réguas em cima e à esquerda, com a faixa da seleção destacada. */
+function drawRulers(host: CanvasHost, canvas: Canvas, ck: CanvasKit, fill: PaintFn, stroke: (color: string, width?: number, alpha?: number) => SkPaint) {
+  const ed = host.editor;
+  const { width, height } = host.size();
+  const dark = ed.theme === 'dark';
+  const bg = dark ? '#1a1917' : '#f4f1eb';
+  const ink = dark ? '#75705f' : '#958d7f';
+  const line = dark ? '#2b2925' : '#ddd6c9';
+  const z = ed.viewport.zoom;
+  // passo entre números: pelo menos ~60 px na tela
+  const steps = [1, 2, 5, 10, 20, 25, 50, 100, 200, 250, 500, 1000, 2000, 2500, 5000, 10000];
+  const step = steps.find((s) => s * z >= 60) ?? 10000;
+  const minor = step / (step % 5 === 0 ? 5 : step % 2 === 0 ? 2 : 1);
+  canvas.drawRect(ck.LTRBRect(0, 0, width, RULER), fill(bg));
+  canvas.drawRect(ck.LTRBRect(0, 0, RULER, height), fill(bg));
+  // faixa da seleção
+  const sb = ed.selectionBounds();
+  if (sb) {
+    const a = ed.worldToScreen({ x: sb.x, y: sb.y });
+    canvas.drawRect(ck.LTRBRect(Math.max(RULER, a.x), 0, a.x + sb.width * z, RULER), fill(SEL, 0.18));
+    canvas.drawRect(ck.LTRBRect(0, Math.max(RULER, a.y), RULER, a.y + sb.height * z), fill(SEL, 0.18));
+  }
+  const tick = stroke(ink, 1, 0.8);
+  const x0 = ed.screenToWorld({ x: RULER, y: 0 }).x, x1 = ed.screenToWorld({ x: width, y: 0 }).x;
+  for (let v = Math.floor(x0 / minor) * minor; v <= x1; v += minor) {
+    const sx = Math.round(ed.worldToScreen({ x: v, y: 0 }).x) + 0.5;
+    if (sx < RULER) continue;
+    const major = Math.abs(v / step - Math.round(v / step)) < 1e-6;
+    canvas.drawLine(sx, major ? 0 : RULER - 5, sx, RULER, tick);
+    if (major) canvas.drawParagraph(label(host, fmt(v).toString(), ink, 9.5, 400), sx + 3, 2);
+  }
+  const y0 = ed.screenToWorld({ x: 0, y: RULER }).y, y1 = ed.screenToWorld({ x: 0, y: height }).y;
+  for (let v = Math.floor(y0 / minor) * minor; v <= y1; v += minor) {
+    const sy = Math.round(ed.worldToScreen({ x: 0, y: v }).y) + 0.5;
+    if (sy < RULER) continue;
+    const major = Math.abs(v / step - Math.round(v / step)) < 1e-6;
+    canvas.drawLine(major ? 0 : RULER - 5, sy, RULER, sy, tick);
+    if (major) {
+      canvas.save();
+      canvas.translate(2, sy - 3);
+      canvas.rotate(-90, 0, 0);
+      canvas.drawParagraph(label(host, fmt(v).toString(), ink, 9.5, 400), 0, 0);
+      canvas.restore();
+    }
+  }
+  // marcas das guias nas réguas
+  for (const g of ed.page.guides ?? []) {
+    const s = ed.worldToScreen({ x: g.at, y: g.at });
+    if (g.axis === 'x' && s.x > RULER) canvas.drawRect(ck.LTRBRect(s.x - 1, RULER - 6, s.x + 2, RULER), fill(GUIDE));
+    if (g.axis === 'y' && s.y > RULER) canvas.drawRect(ck.LTRBRect(RULER - 6, s.y - 1, RULER, s.y + 2), fill(GUIDE));
+  }
+  const border = stroke(line, 1);
+  canvas.drawLine(RULER, RULER - 0.5, width, RULER - 0.5, border);
+  canvas.drawLine(RULER - 0.5, RULER, RULER - 0.5, height, border);
+  canvas.drawRect(ck.LTRBRect(0, 0, RULER, RULER), fill(bg));
 }
 
 function fmt(v: number) {

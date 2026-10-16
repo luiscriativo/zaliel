@@ -1,4 +1,4 @@
-// Auto layout (flexbox simplificado, no modelo do Figma), ajuste de grupos,
+// Auto layout (flexbox simplificado), ajuste de grupos,
 // medida de textos e constraints. Tudo puro: recebe nós e devolve as mudanças.
 import type { ContainerNode, SceneNode, TextNode } from './types';
 import { boundsOf, nodeMatrix, apply, rectCorners } from './util';
@@ -65,7 +65,7 @@ export function layoutNode(n: SceneNode, ctx: LayoutContext, lockW = false, lock
   }
   if (!('children' in n)) return;
   for (const c of n.children) layoutNode(c, ctx);
-  if (n.type === 'group') {
+  if (n.type === 'group' || n.type === 'boolean') {
     fitGroup(n, ctx);
     return;
   }
@@ -138,7 +138,12 @@ function arrange(n: ContainerNode, ctx: LayoutContext, lockW: boolean, lockH: bo
   }
 
   // Eixo cruzado
-  const lineCross = lines.map((line) => Math.max(0, ...line.filter((c) => sizingOf(c, !horiz) !== 'fill' && L.align !== 'stretch').map((c) => c[C])));
+  // linhas só com filhos que esticam não definem tamanho: mantêm o tamanho atual do container
+  const current = n[C] - padCross;
+  const lineCross = lines.map((line) => {
+    const sized = line.filter((c) => sizingOf(c, !horiz) !== 'fill' && L.align !== 'stretch');
+    return sized.length ? Math.max(0, ...sized.map((c) => c[C])) : lines.length === 1 ? Math.max(0, current) : Math.max(0, ...line.map((c) => c[C]));
+  });
   if (hugCross) {
     const crossGap = L.crossGap ?? L.gap;
     const content = lineCross.reduce((s, v) => s + v, 0) + crossGap * Math.max(0, lines.length - 1);
@@ -157,7 +162,7 @@ function arrange(n: ContainerNode, ctx: LayoutContext, lockW: boolean, lockH: bo
   }
 
   // Filhos que mudaram de tamanho refazem o próprio layout com o eixo travado
-  for (const c of resized) if ('children' in c && (c.layout || c.type === 'group')) {
+  for (const c of resized) if ('children' in c && (c.layout || c.type === 'group' || c.type === 'boolean')) {
     const fillW = sizingOf(c, true) === 'fill' || (!horiz && L.align === 'stretch');
     const fillH = sizingOf(c, false) === 'fill' || (horiz && L.align === 'stretch');
     layoutNode(c, ctx, fillW, fillH);
@@ -191,7 +196,7 @@ function arrange(n: ContainerNode, ctx: LayoutContext, lockW: boolean, lockH: bo
   }
 }
 
-/** Grupo: a caixa sempre envolve os filhos. Move o grupo e compensa os filhos. */
+/** Grupo (e operação booleana): a caixa sempre envolve os filhos. Move o grupo e compensa os filhos. */
 export function fitGroup(g: ContainerNode, ctx: LayoutContext): void {
   const visible = g.children;
   if (!visible.length) return;

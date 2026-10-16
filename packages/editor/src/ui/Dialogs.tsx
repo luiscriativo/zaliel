@@ -6,8 +6,10 @@ import { COMMANDS, keyLabel } from './commands';
 import { NumberField, Seg, Check, TextField } from './controls';
 import { PaintPicker } from './ColorPicker';
 import type { UpdateStatus } from '../platform';
+import { VersionsDialog, FindPanel, ExportBatchDialog } from './FileDialogs';
+import { AutomationSettings } from './AutomationSettings';
 
-function Dialog(props: { title: string; onClose: () => void; children: ReactNode; footer?: ReactNode; wide?: boolean }) {
+export function Dialog(props: { title: string; onClose: () => void; children: ReactNode; footer?: ReactNode; wide?: boolean }) {
   const ref = useRef<HTMLDivElement>(null);
   useDismiss(true, props.onClose, ref);
   return (
@@ -38,6 +40,12 @@ export function Dialogs() {
       return <VariablesDialog onClose={close} />;
     case 'updates':
       return <UpdatesDialog onClose={close} />;
+    case 'versions':
+      return <VersionsDialog onClose={close} />;
+    case 'find':
+      return <FindPanel onClose={close} />;
+    case 'exportBatch':
+      return <ExportBatchDialog onClose={close} />;
     default:
       return null;
   }
@@ -66,6 +74,18 @@ function SettingsDialog({ onClose }: { onClose: () => void }) {
         </div>
       </div>
       <div className="setting">
+        <div className="s-title">Salvar automaticamente</div>
+        <div className="s-desc">Grava sozinho, logo depois de cada alteração, os arquivos que já foram salvos uma vez.</div>
+        <Check checked={s.autoSave} onChange={(v) => save({ autoSave: v })} label="" />
+      </div>
+      <div className="setting">
+        <div className="s-title">Seu nome nos comentários</div>
+        <div className="s-desc">Vazio usa o nome do usuário do computador{ed.platform.user ? ` (${ed.platform.user})` : ''}.</div>
+        <div style={{ width: 170 }}>
+          <TextField value={s.author} placeholder={ed.platform.user || 'Seu nome'} onChange={(v) => save({ author: v.trim() })} />
+        </div>
+      </div>
+      <div className="setting">
         <div className="s-title">Encaixe inteligente</div>
         <div className="s-desc">Guias que alinham bordas e centros enquanto você move ou redimensiona. Segure Ctrl para ignorar.</div>
         <Check checked={s.snapping} onChange={(v) => save({ snapping: v })} label="" />
@@ -75,6 +95,7 @@ function SettingsDialog({ onClose }: { onClose: () => void }) {
         <div className="s-desc">Mostra a grade quando o zoom passa de 800%.</div>
         <Check checked={s.pixelGrid} onChange={(v) => save({ pixelGrid: v })} label="" />
       </div>
+      <AutomationSettings />
     </Dialog>
   );
 }
@@ -164,7 +185,7 @@ function UpdatesDialog({ onClose }: { onClose: () => void }) {
       break;
     case 'downloaded':
       body = <>A versão {st.version} está pronta. Ela será instalada ao reiniciar — ou quando você fechar o Zaliel.</>;
-      action = <button className="btn primary" onClick={async () => (await ed.confirmDiscard()) && ed.platform.update.install()}>Reiniciar e instalar</button>;
+      action = <button className="btn primary" onClick={async () => (await ed.confirmCloseAll()) && ed.platform.update.install()}>Reiniciar e instalar</button>;
       break;
     case 'not-available':
       body = <><CheckCircle2 size={14} style={{ color: 'var(--success)', verticalAlign: -2 }} /> Você está na versão mais recente (v{st.current}){st.checkedAt ? ` · verificado ${timeAgo(st.checkedAt)}` : ''}.</>;

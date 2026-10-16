@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { FilePlus, FolderOpen, WifiOff, ShieldCheck, FileJson, X } from 'lucide-react';
+import { FilePlus, FolderOpen, WifiOff, ShieldCheck, HardDrive, X } from 'lucide-react';
 import { useEditor, timeAgo } from './hooks';
 import { keyLabel } from './commands';
 import type { RecentFile, RecoveryEntry } from '../platform';
@@ -34,7 +34,7 @@ export function Home() {
         <div className="facts">
           <div><WifiOff size={13} /> Funciona 100% offline. Nada sai do seu computador.</div>
           <div><ShieldCheck size={13} /> Sem inteligência artificial, sem nuvem, sem conta.</div>
-          <div><FileJson size={13} /> Arquivos .zal em JSON legível — abra em qualquer editor de texto.</div>
+          <div><HardDrive size={13} /> Seus arquivos .zal ficam no seu computador, onde você escolher.</div>
         </div>
       </div>
 
