@@ -1,6 +1,6 @@
 // Auto layout (flexbox simplificado), ajuste de grupos,
 // medida de textos e constraints. Tudo puro: recebe nós e devolve as mudanças.
-import type { ContainerNode, InstanceNode, SceneNode, TextNode } from './types';
+import type { AutoLayout, ContainerNode, InstanceNode, SceneNode, TextNode } from './types';
 import { boundsOf, nodeMatrix, apply, rectCorners } from './util';
 
 export interface Change {
@@ -17,6 +17,17 @@ export interface LayoutContext {
   measureText?: MeasureText;
   /** Tamanho de uma instância que abraça o conteúdo (null = vale o tamanho gravado). */
   measureInstance?: (n: InstanceNode) => { width: number; height: number } | null;
+  /** Onde fica cada slot com conteúdo próprio dentro da instância (posição e layout do conteúdo). */
+  placeSlots?: (n: InstanceNode) => {
+    holder: string;
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+    layout?: AutoLayout;
+    clip?: boolean;
+    children: { id: string; x: number; y: number; width: number; height: number }[];
+  }[];
   changes: Change[];
 }
 
@@ -66,11 +77,14 @@ export function layoutNode(n: SceneNode, ctx: LayoutContext, lockW = false, lock
     return;
   }
   if (n.type === 'instance') {
+    // o conteúdo dos slots se arruma por dentro antes (o tamanho dele entra na medida da instância)
+    for (const h of n.slots ?? []) for (const c of h.children) layoutNode(c, ctx);
     const s = ctx.measureInstance?.(n);
     if (s) {
       if (!lockW) set(ctx, n, 'width', s.width);
       if (!lockH) set(ctx, n, 'height', s.height);
     }
+    if (n.slots?.length && ctx.placeSlots) placeSlotContent(n, ctx);
     return;
   }
   if (!('children' in n)) return;
@@ -215,6 +229,39 @@ function arrange(n: ContainerNode, ctx: LayoutContext, lockW: boolean, lockH: bo
       cursor += c[M] + gap;
     }
     crossCursor += lineSize + crossGap;
+  }
+}
+
+/** Grava nas camadas reais de cada slot a posição que o componente dá a elas. */
+function placeSlotContent(n: InstanceNode, ctx: LayoutContext): void {
+  for (const p of ctx.placeSlots!(n)) {
+    const h = n.slots!.find((s) => s.id === p.holder);
+    if (!h) continue;
+    set(ctx, h, 'x', p.x);
+    set(ctx, h, 'y', p.y);
+    set(ctx, h, 'width', p.width);
+    set(ctx, h, 'height', p.height);
+    // o frame da instância copia o layout do slot (arrastar para reordenar usa isso)
+    if (JSON.stringify(h.layout) !== JSON.stringify(p.layout)) {
+      ctx.changes.push({ id: h.id, key: 'layout', old: h.layout, value: p.layout });
+      h.layout = p.layout;
+    }
+    if ((h.clip ?? false) !== (p.clip ?? false)) {
+      ctx.changes.push({ id: h.id, key: 'clip', old: h.clip, value: p.clip });
+      h.clip = p.clip;
+    }
+    for (const k of p.children) {
+      const c = h.children.find((x) => x.id === k.id);
+      if (!c) continue;
+      const before = { w: c.width, h: c.height };
+      set(ctx, c, 'x', k.x);
+      set(ctx, c, 'y', k.y);
+      set(ctx, c, 'width', k.width);
+      set(ctx, c, 'height', k.height);
+      // esticado pelo slot: refaz o layout de dentro com o eixo travado
+      const resized = Math.abs(before.w - c.width) > EPS || Math.abs(before.h - c.height) > EPS;
+      if (resized && 'children' in c && (c.layout || c.type === 'group')) layoutNode(c, ctx, Math.abs(before.w - c.width) > EPS, Math.abs(before.h - c.height) > EPS);
+    }
   }
 }
 

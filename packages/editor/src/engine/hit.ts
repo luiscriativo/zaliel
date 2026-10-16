@@ -49,11 +49,8 @@ export function hitPath(editor: Editor, p: Point, tolerance: number): string[] {
  */
 export function pickTarget(editor: Editor, p: Point, deep: boolean): string | null {
   const tol = 2 / editor.viewport.zoom;
-  let path = hitPath(editor, p, tol);
+  const path = selectablePath(editor, hitPath(editor, p, tol));
   if (!path.length) return null;
-  // nós de dentro de instâncias não são selecionáveis por clique (edite pelo painel ou duplo clique)
-  const firstInner = path.findIndex((id) => editor.isInner(id));
-  if (firstInner > 0) path = path.slice(0, firstInner);
   if (deep) return path[path.length - 1];
 
   const idx = editor.model.index;
@@ -71,11 +68,31 @@ export function pickTarget(editor: Editor, p: Point, deep: boolean): string | nu
   return target;
 }
 
-/** Ao dar duplo clique: o próximo nível dentro do selecionado. */
+/**
+ * Caminho só com o que dá para selecionar: nós de dentro de instâncias ficam de fora (edite pelo
+ * painel ou com duplo clique), mas o conteúdo dos slots é camada da instância e entra, junto com o
+ * frame do slot que o guarda.
+ */
+export function selectablePath(editor: Editor, path: string[]): string[] {
+  const out: string[] = [];
+  for (const id of path) {
+    if (editor.isInner(id)) continue;
+    const parent = editor.model.index.parentId(id);
+    const holder = parent ? editor.model.index.get(parent) : undefined;
+    if (holder?.type === 'frame' && holder.slotOf && out[out.length - 1] !== holder.id) out.push(holder.id);
+    out.push(id);
+  }
+  return out;
+}
+
+/** Ao dar duplo clique: o próximo nível dentro do selecionado (o frame de um slot é atravessado). */
 export function pickInside(editor: Editor, p: Point, containerId: string): string | null {
-  const path = hitPath(editor, p, 2 / editor.viewport.zoom);
+  const path = selectablePath(editor, hitPath(editor, p, 2 / editor.viewport.zoom));
   const i = path.indexOf(containerId);
-  return i >= 0 && i + 1 < path.length ? path[i + 1] : null;
+  if (i < 0 || i + 1 >= path.length) return null;
+  const next = editor.model.index.get(path[i + 1]);
+  if (next?.type === 'frame' && next.slotOf && i + 2 < path.length) return path[i + 2];
+  return path[i + 1];
 }
 
 /** Seleção por retângulo: nós do nível de `parentId` que encostam no retângulo. */

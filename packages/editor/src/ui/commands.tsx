@@ -3,7 +3,7 @@ import type { ReactNode } from 'react';
 import {
   Copy, Scissors, Clipboard, CopyPlus, Trash2, Group, Ungroup, Frame, Component, Unlink, Rows3, Eye, Lock,
   FilePlus, FolderOpen, Save, ImagePlus, Download, ZoomIn, ZoomOut, Maximize2, Scan, Keyboard, Info, RefreshCw, Settings, Undo2, Redo2, Grid3x3, Magnet, Variable, AppWindow, X,
-  FileInput, History, Search, MessageCircle, Image as ImageIcon, Code, LayoutTemplate, PencilLine, FolderDown, FlipHorizontal2, FlipVertical2, SquaresUnite, SquaresSubtract, SquaresIntersect, SquaresExclude, PenTool, Spline, Ruler, LayoutGrid, Play, FileText, Layers2, SquarePlus,
+  FileInput, History, Search, MessageCircle, Image as ImageIcon, Code, LayoutTemplate, PencilLine, FolderDown, FlipHorizontal2, FlipVertical2, SquaresUnite, SquaresSubtract, SquaresIntersect, SquaresExclude, PenTool, Spline, Ruler, LayoutGrid, Play, FileText, Layers2, SquarePlus, SquareDashed,
 } from 'lucide-react';
 import type { Editor, Tool } from '../editor';
 import { isMac } from './hooks';
@@ -52,6 +52,8 @@ const canBool = (ed: Editor) => (ed.selectedNodes().length > 1 && isShape(ed)) |
 const unlocked = (ed: Editor) => ed.selectedNodes().every((n) => !n.locked);
 // combinar: dois ou mais componentes soltos (com um só, o caminho é "Adicionar variante")
 const allComponents = (ed: Editor) => ed.selectedNodes().length > 1 && ed.selectedNodes().every((n) => n.type === 'component') && !ed.setFor(ed.selection[0]);
+/** Camadas dentro de um componente (o slot é um frame de dentro dele). */
+const inComponent = (ed: Editor) => ed.selection.length > 0 && ed.selection.every((id) => ed.model.index.get(id)?.type !== 'component' && ed.model.index.ancestors(id).some((a) => a.type === 'component'));
 const variantTarget = (ed: Editor) => one(ed) && ['component', 'component-set'].includes(ed.selectedNodes()[0]?.type ?? '');
 
 export const COMMANDS: Command[] = [
@@ -95,6 +97,7 @@ export const COMMANDS: Command[] = [
   { id: 'obj.selectParent', label: 'Selecionar o pai', keys: ['Shift+Enter'], run: (ed) => ed.selectParent(), enabled: hasParent },
   { id: 'obj.selectChildren', label: 'Selecionar filhos', keys: ['Enter'], run: (ed) => ed.selectChildren(), enabled: hasKids },
   { id: 'obj.detach', label: 'Desanexar instância', keys: ['Mod+Alt+B'], icon: <Unlink size={14} />, run: (ed) => ed.detach(), enabled: isInst },
+  { id: 'obj.slot', label: 'Converter em slot', keys: ['Mod+Alt+L'], icon: <SquareDashed size={14} />, run: (ed) => ed.convertToSlot(), enabled: inComponent },
   { id: 'obj.main', label: 'Ir para o componente principal', run: (ed) => ed.goToMainComponent(), enabled: (ed) => one(ed) && isInst(ed) },
   { id: 'obj.variants', label: 'Combinar como variantes', icon: <Layers2 size={14} />, run: (ed) => ed.combineAsVariants(), enabled: allComponents },
   { id: 'obj.addVariant', label: 'Adicionar variante', icon: <SquarePlus size={14} />, run: (ed) => ed.addVariant(), enabled: variantTarget },

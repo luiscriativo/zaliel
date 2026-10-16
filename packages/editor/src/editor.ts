@@ -52,6 +52,16 @@ import {
   addVersion,
   COMPACT_FROM,
   walk,
+  placeSlots,
+  materializeSlots,
+  slotTarget,
+  slotHolder,
+  findSlot,
+  componentSlots,
+  createSlotHolder,
+  remapSlots,
+  type SlotDef,
+  type Mat,
   type DocVersion,
   type DocComment,
   type ImportResult,
@@ -295,6 +305,9 @@ export class Editor {
     });
     // instâncias que abraçam o conteúdo se medem pelo componente (texto e propriedades delas)
     this.model.measureInstance = (n) => naturalInstanceSize(n, this.finder, this.host?.measureText);
+    // conteúdo dos slots: posição dada pelo componente; o frame do slot nasce quando algo entra nele
+    this.model.placeSlots = (n) => placeSlots(n, this.finder, this.host?.measureText);
+    this.model.prepare = (ops) => materializeSlots(this.model.index, this.finder, ops);
     if (this.host) this.model.measureText = this.host.measureText;
   }
 
@@ -441,6 +454,101 @@ export class Editor {
   /** Id de um nó dentro de uma instância ("instancia/interno"). */
   isInner(id: string): boolean {
     return id.includes('/');
+  }
+
+  /** Matriz (para a página) de um nó de dentro de uma instância, pela árvore exibida. */
+  innerMatrix(id: string): Mat {
+    const instanceId = id.split('/')[0];
+    const base = this.model.index.worldMatrix(instanceId);
+    const inst = this.model.index.get(instanceId);
+    if (!inst) return base;
+    const r = this.resolve(inst);
+    const visit = (list: SceneNode[], m: Mat): Mat | null => {
+      for (const c of list) {
+        const cm = multiply(m, nodeMatrix(c));
+        if (c.id === id) return cm;
+        if ('children' in c) {
+          const f = visit(c.children, cm);
+          if (f) return f;
+        }
+      }
+      return null;
+    };
+    return ('children' in r && visit(r.children, base)) || base;
+  }
+
+  /**
+   * Slot da instância embaixo de um ponto: o frame com o conteúdo próprio dele, ou
+   * "instância/slot" quando ainda não tem (o frame é criado quando algo entrar).
+   */
+  slotAt(inst: InstanceNode, p: Point): string | null {
+    const main = this.findComponent(inst.componentId, inst.library);
+    const slots = main ? componentSlots(main) : [];
+    if (!slots.length) return null;
+    const keys = new Map(slots.map((s) => [innerId(inst.id, s.id), s.id]));
+    const r = this.resolve(inst);
+    let found: string | null = null;
+    const visit = (list: SceneNode[], m: Mat): boolean => {
+      for (let i = list.length - 1; i >= 0; i--) {
+        const c = list[i];
+        if (c.visible === false) continue;
+        const cm = multiply(m, nodeMatrix(c));
+        const local = apply(invert(cm), p);
+        if (local.x < 0 || local.y < 0 || local.x > c.width || local.y > c.height) continue;
+        // o mais fundo vence (um slot dentro do conteúdo padrão de outro)
+        if ('children' in c && visit(c.children, cm)) return true;
+        const key = keys.get(c.id);
+        if (key) {
+          found = key;
+          return true;
+        }
+      }
+      return false;
+    };
+    visit('children' in r ? r.children : [], this.model.index.worldMatrix(inst.id));
+    if (!found) return null;
+    return slotHolder(inst, found)?.id ?? slotTarget(inst.id, found);
+  }
+
+  /** Áreas dos slots de uma instância na página (para desenhar o destaque e achar o destino). */
+  slotAreas(inst: InstanceNode): { slotId: string; name: string; m: Mat; width: number; height: number }[] {
+    const main = this.findComponent(inst.componentId, inst.library);
+    const slots = main ? componentSlots(main) : [];
+    if (!slots.length) return [];
+    const keys = new Map(slots.map((s) => [innerId(inst.id, s.id), s]));
+    const r = this.resolve(inst);
+    const out: { slotId: string; name: string; m: Mat; width: number; height: number }[] = [];
+    const visit = (list: SceneNode[], m: Mat) => {
+      for (const c of list) {
+        if (c.visible === false) continue;
+        const cm = multiply(m, nodeMatrix(c));
+        const s = keys.get(c.id);
+        if (s) out.push({ slotId: s.id, name: s.name, m: cm, width: c.width, height: c.height });
+        if ('children' in c) visit(c.children, cm);
+      }
+    };
+    visit('children' in r ? r.children : [], this.model.index.worldMatrix(inst.id));
+    return out;
+  }
+
+  /** Frame-slot do componente para um destino "instância/slot" ou para o frame de conteúdo de uma instância. */
+  slotInfo(id: string): { inst: InstanceNode; slot: ContainerNode; holder?: ContainerNode } | null {
+    let inst: SceneNode | undefined;
+    let slotId: string | undefined;
+    if (this.isInner(id)) {
+      const [a, ...rest] = id.split('/');
+      inst = this.model.index.get(a);
+      slotId = rest.join('/');
+    } else {
+      const n = this.model.index.get(id);
+      if (n?.type !== 'frame' || !n.slotOf) return null;
+      inst = this.model.index.get(this.model.index.parentId(id) ?? '');
+      slotId = n.slotOf;
+    }
+    if (inst?.type !== 'instance' || !slotId) return null;
+    const main = this.findComponent(inst.componentId, inst.library);
+    const slot = main && findSlot(main, slotId);
+    return slot ? { inst, slot, holder: slotHolder(inst, slotId) } : null;
   }
 
   // ── Documento ──────────────────────────────────────────────────────────────
@@ -1287,6 +1395,7 @@ export class Editor {
 
   /** Converte um ponto da página para o espaço de um container (ou da página). */
   toLocal(parentId: string, p: Point): Point {
+    if (this.isInner(parentId)) return apply(invert(this.innerMatrix(parentId)), p);
     if (parentId === this.pageId || !this.model.index.get(parentId)) return p;
     return apply(invert(this.model.index.worldMatrix(parentId)), p);
   }
@@ -1361,6 +1470,13 @@ export class Editor {
       for (let i = list.length - 1; i >= 0; i--) {
         const n = list[i];
         if (n.visible === false || exclude.has(n.id) || n.locked) continue;
+        if (n.type === 'instance') {
+          // slots da instância recebem camadas (e frames dentro do conteúdo deles também)
+          const slot = this.slotAt(n, p);
+          if (!slot) continue;
+          const holder = this.model.index.get(slot);
+          return (holder && 'children' in holder && visit(holder.children)) || slot;
+        }
         if (n.type !== 'frame' && n.type !== 'component' && n.type !== 'component-set') continue;
         const local = apply(invert(this.model.index.worldMatrix(n.id)), p);
         if (local.x >= 0 && local.y >= 0 && local.x <= n.width && local.y <= n.height) {
@@ -1440,7 +1556,11 @@ export class Editor {
 
   /** Remove ids que estão dentro de outros ids da lista. */
   topLevel(ids: string[]): string[] {
-    const set = new Set(ids.filter((id) => this.model.index.get(id)));
+    // o frame que guarda o conteúdo de um slot não sai do lugar (posição e pai são do componente)
+    const set = new Set(ids.filter((id) => {
+      const n = this.model.index.get(id);
+      return n && !(n.type === 'frame' && n.slotOf);
+    }));
     return [...set].filter((id) => !this.model.index.ancestors(id).some((a) => set.has(a.id)));
   }
 
@@ -1668,7 +1788,97 @@ export class Editor {
 
   resetOverrides(): void {
     const ids = this.selection.filter((id) => this.model.index.get(id)?.type === 'instance');
-    this.run('Restaurar instância', ids.flatMap((id) => [{ op: 'set', id, key: 'overrides', value: undefined }, { op: 'set', id, key: 'props', value: undefined }] as Op[]));
+    this.run('Restaurar instância', ids.flatMap((id) => {
+      const inst = this.model.index.get(id) as InstanceNode;
+      // os slots também voltam ao conteúdo padrão
+      const slots: Op[] = (inst.slots ?? []).map((h) => ({ op: 'remove', id: h.id }));
+      return [{ op: 'set', id, key: 'overrides', value: undefined }, { op: 'set', id, key: 'props', value: undefined }, ...slots] as Op[];
+    }));
+  }
+
+  // ── Slots ──────────────────────────────────────────────────────────────────
+
+  /** Frames de dentro de um componente que podem virar slot (não o próprio componente). */
+  private slotCandidates(ids: string[]): ContainerNode[] {
+    return ids
+      .map((id) => this.model.index.get(id))
+      .filter((n): n is ContainerNode => n?.type === 'frame' && !n.slotOf && this.model.index.ancestors(n.id).some((a) => a.type === 'component'));
+  }
+
+  /** Marca frames de dentro de um componente como slot. Outras camadas são embrulhadas num frame-slot. */
+  convertToSlot(ids = this.selection): void {
+    const frames = this.slotCandidates(ids);
+    if (frames.length && frames.length === ids.length) {
+      this.run('Converter em slot', frames.map((f) => ({ op: 'set', id: f.id, key: 'slot', value: f.slot ?? {} }) as Op));
+      return;
+    }
+    const inside = ids.filter((id) => this.model.index.get(id)?.type !== 'component' && this.model.index.ancestors(id).some((a) => a.type === 'component'));
+    if (!inside.length || inside.length !== ids.length) {
+      this.toast('info', 'Selecione um frame (ou camadas) dentro de um componente para criar um slot.', { detail: 'O slot é a área que cada instância preenche com o próprio conteúdo, sem desanexar.' });
+      return;
+    }
+    // como "Embrulhar em novo slot" do Figma: um frame em volta das camadas, já marcado
+    const from = this.model.past.length;
+    this.select(ids);
+    this.wrap('frame');
+    const frame = this.selectedNodes()[0];
+    if (frame?.type !== 'frame') return;
+    this.run('Converter em slot', [{ op: 'set', id: frame.id, key: 'name', value: 'Slot' }, { op: 'set', id: frame.id, key: 'slot', value: {} }]);
+    this.model.squash(from, 'Embrulhar em novo slot');
+  }
+
+  removeSlot(id: string): void {
+    this.run('Remover slot', [{ op: 'set', id, key: 'slot', value: undefined }]);
+  }
+
+  updateSlot(id: string, patch: Partial<SlotDef>, merge?: string): void {
+    const n = this.model.index.get(id);
+    if (n?.type !== 'frame' || !n.slot) return;
+    const next: SlotDef = { ...n.slot, ...patch };
+    for (const k of Object.keys(next) as (keyof SlotDef)[]) {
+      const v = next[k];
+      if (v === undefined || v === '' || (Array.isArray(v) && !v.length)) delete next[k];
+    }
+    this.run('Editar slot', [{ op: 'set', id, key: 'slot', value: next }], { merge });
+  }
+
+  /** Insere uma instância de um componente dentro do slot de uma instância (no fim do conteúdo). */
+  insertIntoSlot(instId: string, slotId: string, componentId: string, library?: string): void {
+    const inst = this.model.index.get(instId);
+    if (inst?.type !== 'instance') return;
+    const main = this.findComponent(componentId, library);
+    if (!main) return this.toast('warn', 'Este componente não está mais disponível.');
+    const set = this.finder.setOf?.(main.id, library);
+    const node = createNode('instance', { x: 0, y: 0, width: main.width, height: main.height }, { componentId: main.id, library, name: set?.name ?? main.name });
+    const parent = slotHolder(inst, slotId)?.id ?? slotTarget(instId, slotId);
+    const info = this.slotInfo(parent);
+    // slot sem auto layout: entra no canto, embaixo do que já existe
+    if (info && !info.slot.layout) {
+      const kids = info.holder?.children ?? info.slot.children;
+      node.y = kids.length ? Math.max(...kids.map((k) => k.y + k.height)) + 8 : 0;
+    }
+    this.run('Inserir no slot', [{ op: 'insert', parent, index: 1e9, node }], { select: [node.id] });
+  }
+
+  /** Deixa o slot vazio na instância (sem o conteúdo padrão). */
+  clearSlot(instId: string, slotId: string): void {
+    const inst = this.model.index.get(instId);
+    if (inst?.type !== 'instance') return;
+    const holder = slotHolder(inst, slotId);
+    if (holder) {
+      this.run('Limpar slot', holder.children.map((c) => ({ op: 'remove', id: c.id }) as Op));
+      return;
+    }
+    const info = this.slotInfo(slotTarget(instId, slotId));
+    if (!info) return;
+    this.run('Limpar slot', [{ op: 'insert', parent: instId, index: inst.slots?.length ?? 0, node: createSlotHolder(inst, info.slot, false) }]);
+  }
+
+  /** Volta o slot ao conteúdo padrão do componente (descarta o conteúdo da instância). */
+  resetSlot(instId: string, slotId: string): void {
+    const inst = this.model.index.get(instId);
+    const holder = inst?.type === 'instance' ? slotHolder(inst, slotId) : undefined;
+    if (holder) this.run('Restaurar slot', [{ op: 'remove', id: holder.id }], { select: [instId] });
   }
 
   goToMainComponent(): void {
@@ -1825,6 +2035,11 @@ export class Editor {
       { op: 'set', id: instId, key: 'componentId', value: target.id },
       { op: 'set', id: instId, key: 'overrides', value: remapOverrides(inst.overrides, main, target) },
     ];
+    // conteúdo dos slots vai para o slot de mesmo nome; sem um correspondente, sai
+    for (const m of remapSlots(inst.slots, main, target)) {
+      if (m.slotOf) ops.push({ op: 'set', id: m.holder, key: 'slotOf', value: m.slotOf });
+      else ops.push({ op: 'remove', id: m.holder });
+    }
     // instância no tamanho original acompanha o tamanho da nova variante
     if (Math.abs(inst.width - main.width) < 0.5 && Math.abs(inst.height - main.height) < 0.5) {
       ops.push({ op: 'set', id: instId, key: 'width', value: target.width }, { op: 'set', id: instId, key: 'height', value: target.height });

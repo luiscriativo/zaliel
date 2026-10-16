@@ -195,6 +195,28 @@ export interface ContainerNode extends BaseNode {
   booleanOp?: BooleanOp;
   /** Frames: grades de layout (colunas, linhas ou grade quadrada). */
   grids?: LayoutGrid[];
+  /** Frame dentro de um componente: área livre onde cada instância coloca o próprio conteúdo. */
+  slot?: SlotDef;
+  /** Conteúdo de um slot guardado na instância: id do frame-slot dentro do componente. */
+  slotOf?: string;
+}
+
+// ── Slots ────────────────────────────────────────────────────────────────────
+
+/** Componente sugerido para um slot. */
+export interface SlotPreferred {
+  componentId: string;
+  library?: string;
+}
+
+/** Configuração de um slot (frame dentro de um componente). */
+export interface SlotDef {
+  /** Componentes sugeridos para inserir com um clique (não impede outros). */
+  preferred?: SlotPreferred[];
+  description?: string;
+  /** Orientação da quantidade de camadas (só avisa, não impede). */
+  min?: number;
+  max?: number;
 }
 
 // ── Propriedades de componente ───────────────────────────────────────────────
@@ -353,6 +375,11 @@ export interface InstanceNode extends BaseNode {
   library?: string;
   /** Overrides por id do nó dentro do componente. */
   overrides?: Record<string, InstanceOverride>;
+  /**
+   * Conteúdo próprio dos slots: um frame por slot alterado (`slotOf` = id do slot no componente).
+   * São camadas de verdade (editáveis como qualquer outra); a posição de cada frame é a do slot.
+   */
+  slots?: ContainerNode[];
 }
 
 export type SceneNode = ContainerNode | ShapeNode | PathNode | TextNode | InstanceNode;

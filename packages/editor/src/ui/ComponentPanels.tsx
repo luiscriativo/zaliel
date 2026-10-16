@@ -1,10 +1,11 @@
 // Painéis de componentes: variantes, propriedades (booleana, texto, troca de instância),
-// ligação de camadas às propriedades e os controles da instância.
+// ligação de camadas às propriedades, slots e os controles da instância.
 import { useState } from 'react';
-import { Plus, Minus, Component, Unlink, CornerUpLeft, SquarePlus, ToggleLeft, Type, Replace } from 'lucide-react';
-import { overridableTexts, propertyValues, variantAxes, type ComponentProperty, type ContainerNode, type InstanceNode, type SceneNode } from '@zaliel/core';
+import { Plus, Minus, Component, Unlink, CornerUpLeft, SquarePlus, ToggleLeft, Type, Replace, SquareDashed, Eraser, RotateCcw, X } from 'lucide-react';
+import { componentSlots, overridableTexts, propertyValues, slotHolder, variantAxes, type ComponentProperty, type ContainerNode, type InstanceNode, type SceneNode, type SlotDef } from '@zaliel/core';
+import type { Editor } from '../editor';
 import { useEditor } from './hooks';
-import { Check, IconBtn, Section, Select, TextField } from './controls';
+import { Check, IconBtn, NumberField, Section, Select, TextField } from './controls';
 import { Menu } from './Menu';
 
 const TYPE_LABEL: Record<ComponentProperty['type'], string> = { boolean: 'Booleana', text: 'Texto', swap: 'Troca de instância' };
@@ -157,6 +158,151 @@ export function PropertyBindSection({ node, owner }: { node: SceneNode; owner: C
   );
 }
 
+// ── Slots ────────────────────────────────────────────────────────────────────
+
+/** Nome legível de um componente (com o conjunto de variantes, se for o caso). */
+function componentLabel(ed: Editor, id: string, library?: string): string {
+  const c = ed.findComponent(id, library);
+  if (!c) return 'Componente ausente';
+  const set = ed.finder.setOf?.(c.id, library);
+  return set ? `${set.name} / ${c.name}` : c.name;
+}
+
+/** Biblioteca de onde vem um componente escolhido na lista (undefined = do próprio arquivo). */
+function libraryOf(ed: Editor, id: string): string | undefined {
+  if (ed.model.index.get(id)) return undefined;
+  return ed.doc.libraries.find((l) => l.components.some((c) => c.id === id || (c.type === 'component-set' && c.children.some((k) => k.id === id))))?.id;
+}
+
+/** Frame dentro de um componente: marcar como slot e configurar (sugeridos, limites, descrição). */
+export function SlotSection({ node }: { node: ContainerNode }) {
+  const ed = useEditor('doc');
+  const options = useSwapOptions();
+  const def: SlotDef | undefined = node.slot;
+  if (!def) {
+    return (
+      <Section title="Slot">
+        <button className="btn small block" onClick={() => ed.convertToSlot([node.id])}><SquareDashed size={12} /> Converter em slot</button>
+        <div className="label" style={{ marginTop: 6 }}>Cada instância coloca o próprio conteúdo neste frame, sem desanexar. Posição e auto layout continuam vindo do componente.</div>
+      </Section>
+    );
+  }
+  const preferred = def.preferred ?? [];
+  const own = ed.propertyOwner(node.id);
+  const free = options.filter((o) => !preferred.some((p) => p.componentId === o.value) && o.value !== own?.id && !own?.children.some((c) => c.id === o.value));
+  return (
+    <Section title="Slot" actions={<IconBtn icon={<Minus size={13} />} tip="Deixar de ser slot" onClick={() => ed.removeSlot(node.id)} />}>
+      <TextField value={def.description ?? ''} placeholder="Descrição (para quem usa o componente)" onChange={(v) => ed.updateSlot(node.id, { description: v.trim() || undefined })} />
+      <div className="label" style={{ margin: '8px 0 4px' }}>Componentes sugeridos</div>
+      {preferred.map((p) => (
+        <div className="row" key={`${p.library ?? ''}:${p.componentId}`} style={{ marginBottom: 4 }}>
+          <Component size={12} style={{ color: 'var(--component)', flex: 'none' }} />
+          <span className="grow" style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{componentLabel(ed, p.componentId, p.library)}</span>
+          <IconBtn icon={<X size={12} />} tip="Tirar dos sugeridos" onClick={() => ed.updateSlot(node.id, { preferred: preferred.filter((x) => x !== p) })} />
+        </div>
+      ))}
+      <Select
+        value=""
+        options={[{ value: '', label: '+ Sugerir componente…' }, ...free]}
+        onChange={(v) => {
+          if (!v) return;
+          const library = libraryOf(ed, v);
+          ed.updateSlot(node.id, { preferred: [...preferred, { componentId: v, ...(library ? { library } : {}) }] });
+        }}
+      />
+      <div className="row" style={{ marginTop: 8 }}>
+        <span className="label" style={{ width: 70, flex: 'none' }}>Camadas</span>
+        <NumberField className="grow" value={def.min} placeholder="Mín." min={0} step={1} precision={0} title="Mínimo de camadas (só avisa)" onChange={(v) => ed.updateSlot(node.id, { min: v > 0 ? Math.round(v) : undefined })} />
+        <NumberField className="grow" value={def.max} placeholder="Máx." min={0} step={1} precision={0} title="Máximo de camadas (só avisa)" onChange={(v) => ed.updateSlot(node.id, { max: v > 0 ? Math.round(v) : undefined })} />
+      </div>
+      <div className="label" style={{ marginTop: 6 }}>Os sugeridos aparecem na instância para inserir com um clique; outros conteúdos continuam permitidos.</div>
+    </Section>
+  );
+}
+
+/** Situação de um slot na instância: padrão, alterado, vazio, e se está dentro dos limites. */
+function slotState(def: SlotDef, count: number, own: boolean): { text: string; warn?: string } {
+  const text = !own ? 'Padrão do componente' : count ? `Alterado · ${count} camada${count === 1 ? '' : 's'}` : 'Vazio';
+  if (def.min !== undefined && count < def.min) return { text, warn: `pede pelo menos ${def.min}` };
+  if (def.max !== undefined && count > def.max) return { text, warn: `recomendado até ${def.max}` };
+  return { text };
+}
+
+/** Um slot de uma instância: sugeridos para inserir, esvaziar e restaurar. */
+function SlotRow({ inst, slot }: { inst: InstanceNode; slot: ContainerNode }) {
+  const ed = useEditor('doc');
+  const options = useSwapOptions();
+  const holder = slotHolder(inst, slot.id);
+  const def = slot.slot ?? {};
+  const count = (holder ?? slot).children.length;
+  const st = slotState(def, count, !!holder);
+  const preferred = def.preferred ?? [];
+  return (
+    <div className="prop-def" style={{ marginBottom: 8 }}>
+      <div className="row">
+        <SquareDashed size={12} style={{ color: 'var(--slot)', flex: 'none' }} />
+        <span className="grow" style={{ fontWeight: 500, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={def.description}>{slot.name}</span>
+        <IconBtn icon={<Eraser size={12} />} tip="Esvaziar o slot" disabled={!!holder && !count} onClick={() => ed.clearSlot(inst.id, slot.id)} />
+        <IconBtn icon={<RotateCcw size={12} />} tip="Restaurar o conteúdo padrão" disabled={!holder} onClick={() => ed.resetSlot(inst.id, slot.id)} />
+      </div>
+      <div className="label" style={{ margin: '2px 0 4px 18px' }}>
+        {st.text}
+        {st.warn && <span style={{ color: 'var(--warn)' }}> · {st.warn}</span>}
+      </div>
+      {def.description && <div className="label" style={{ margin: '0 0 4px 18px' }}>{def.description}</div>}
+      {preferred.length > 0 && (
+        <div className="chips" style={{ marginLeft: 18 }}>
+          {preferred.map((p) => (
+            <button key={`${p.library ?? ''}:${p.componentId}`} className="chip slot-chip" title="Inserir no slot" onClick={() => ed.insertIntoSlot(inst.id, slot.id, p.componentId, p.library)}>
+              <Plus size={10} /> {componentLabel(ed, p.componentId, p.library)}
+            </button>
+          ))}
+        </div>
+      )}
+      <div style={{ marginLeft: 18, marginTop: 4 }}>
+        <Select
+          value=""
+          options={[{ value: '', label: '+ Inserir componente…' }, ...options.filter((o) => o.value !== inst.componentId)]}
+          onChange={(v) => v && ed.insertIntoSlot(inst.id, slot.id, v, libraryOf(ed, v))}
+        />
+      </div>
+    </div>
+  );
+}
+
+/** Slots de uma instância. */
+export function InstanceSlotsSection({ inst }: { inst: InstanceNode }) {
+  const ed = useEditor('doc');
+  const main = ed.findComponent(inst.componentId, inst.library);
+  const slots = main ? componentSlots(main) : [];
+  if (!slots.length) return null;
+  return (
+    <Section title="Slots">
+      {slots.map((s) => <SlotRow key={s.id} inst={inst} slot={s} />)}
+      <div className="label">Arraste camadas para dentro do slot no canvas ou desenhe direto nele. Duplo clique entra no conteúdo.</div>
+    </Section>
+  );
+}
+
+/** Frame de conteúdo de um slot selecionado (na instância). */
+export function SlotHolderSection({ holder }: { holder: ContainerNode }) {
+  const ed = useEditor('doc');
+  const info = ed.slotInfo(holder.id);
+  if (!info) {
+    return (
+      <Section title="Slot">
+        <div className="label">O componente não tem mais este slot. Mova as camadas para fora ou apague o frame.</div>
+      </Section>
+    );
+  }
+  return (
+    <Section title="Slot">
+      <SlotRow inst={info.inst} slot={info.slot} />
+      <button className="btn small ghost" onClick={() => ed.select([info.inst.id])}>Selecionar a instância “{info.inst.name}”</button>
+    </Section>
+  );
+}
+
 // ── Instância ────────────────────────────────────────────────────────────────
 
 export function InstanceSection({ inst }: { inst: InstanceNode }) {
@@ -208,7 +354,7 @@ export function InstanceSection({ inst }: { inst: InstanceNode }) {
       ))}
       <div className="row" style={{ marginTop: 8, flexWrap: 'wrap' }}>
         {!inst.library && main && <button className="btn small" onClick={() => ed.goToMainComponent()}><CornerUpLeft size={12} /> Principal</button>}
-        <button className="btn small" onClick={() => ed.resetOverrides()} disabled={(!inst.overrides || !Object.keys(inst.overrides).length) && (!inst.props || !Object.keys(inst.props).length)}>Restaurar</button>
+        <button className="btn small" onClick={() => ed.resetOverrides()} disabled={(!inst.overrides || !Object.keys(inst.overrides).length) && (!inst.props || !Object.keys(inst.props).length) && !inst.slots?.length}>Restaurar</button>
         <button className="btn small" onClick={() => ed.detach()}><Unlink size={12} /> Desanexar</button>
       </div>
     </Section>

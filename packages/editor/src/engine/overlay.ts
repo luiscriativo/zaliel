@@ -9,6 +9,8 @@ import { curve, handlePoint, linkCurves, screenRect, type LinkCurve } from './li
 const SEL = '#b5822f';
 const COMPONENT = '#7d5ba6';
 const GUIDE = '#d9583b';
+/** Slots (áreas livres de componentes), como o rosa do Figma, puxado para a paleta. */
+const SLOT = '#c8508e';
 
 const labels = new Map<string, Paragraph>();
 
@@ -76,6 +78,12 @@ export function drawOverlay(host: CanvasHost, canvas: Canvas, ck: CanvasKit): vo
     path.delete();
   };
   const quadOf = (id: string): Point[] | null => {
+    // nó de dentro de uma instância (ex.: um slot ainda sem conteúdo próprio, como destino ao arrastar)
+    if (ed.isInner(id)) {
+      const inst = ed.model.index.get(id.split('/')[0]);
+      const a = inst?.type === 'instance' ? ed.slotAreas(inst).find((s) => `${inst.id}/${s.slotId}` === id) : undefined;
+      return a ? rectCorners({ x: 0, y: 0, width: a.width, height: a.height }).map((p) => ed.worldToScreen(apply(a.m, p))) : null;
+    }
     const n = ed.model.index.get(id);
     if (!n) return null;
     const m = ed.model.index.worldMatrix(id);
@@ -147,6 +155,47 @@ export function drawOverlay(host: CanvasHost, canvas: Canvas, ck: CanvasKit): vo
     canvas.clipRect(ck.LTRBRect(0, -20, maxW, 0), ck.ClipOp.Intersect, true);
     canvas.drawParagraph(p, 0, -17);
     canvas.restore();
+  }
+
+  // slots: tracejado nas áreas livres da instância (ou do componente) selecionada ou sob o mouse
+  {
+    const shown = new Set<string>();
+    const dashed = (pts: Point[], strong: boolean) => {
+      const p = stroke(SLOT, strong ? 1.5 : 1, strong ? 1 : 0.85);
+      const fx = ck.PathEffect.MakeDash([4, 3], 0);
+      if (fx) p.setPathEffect(fx);
+      poly(pts, p);
+      if (fx) {
+        p.setPathEffect(null);
+        fx.delete();
+      }
+    };
+    const owners = [...ed.selection, ...(ed.hover ? [ed.hover] : [])];
+    for (const id of owners) {
+      const n = ed.model.index.get(id);
+      if (!n) continue;
+      // a instância (ou o frame de um slot / o conteúdo selecionado dentro dela)
+      const chain = [n, ...ed.model.index.ancestors(id)];
+      const h = chain.findIndex((a) => a.type === 'frame' && !!a.slotOf);
+      // a própria instância e, se a camada está num slot, a instância dona dele
+      for (const inst of [n.type === 'instance' ? n : undefined, h >= 0 ? chain[h + 1] : undefined]) {
+        if (inst?.type !== 'instance' || shown.has(inst.id)) continue;
+        shown.add(inst.id);
+        for (const a of ed.slotAreas(inst)) dashed(rectCorners({ x: 0, y: 0, width: a.width, height: a.height }).map((p) => ed.worldToScreen(apply(a.m, p))), false);
+      }
+      // no componente: os frames marcados como slot
+      const comp = n.type === 'component' ? n : ed.model.index.ancestors(id).find((a) => a.type === 'component');
+      if (comp && 'children' in comp && !shown.has(comp.id)) {
+        shown.add(comp.id);
+        walk(comp.children, (c) => {
+          if (c.type === 'instance') return false;
+          if (c.type === 'frame' && c.slot) {
+            const q = quadOf(c.id);
+            if (q) dashed(q, ed.selection.includes(c.id));
+          }
+        });
+      }
+    }
   }
 
   // destino ao arrastar para dentro de outro frame

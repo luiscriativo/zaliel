@@ -11,7 +11,7 @@ const MENUS: { label: string; items: MenuEntry[] }[] = [
   {
     label: 'Objeto',
     items: [
-      'obj.group', 'obj.ungroup', 'obj.frame', 'obj.autolayout', '-', 'obj.component', 'obj.variants', 'obj.addVariant', 'obj.detach', 'obj.main', '-',
+      'obj.group', 'obj.ungroup', 'obj.frame', 'obj.autolayout', '-', 'obj.component', 'obj.variants', 'obj.addVariant', 'obj.slot', 'obj.detach', 'obj.main', '-',
       'obj.union', 'obj.subtract', 'obj.intersect', 'obj.exclude', 'obj.flatten', 'obj.editPoints', '-', 'obj.flipH', 'obj.flipV', 'obj.textOnPath', '-',
       'obj.front', 'obj.forward', 'obj.backward', 'obj.back', '-', 'obj.alignLeft', 'obj.alignH', 'obj.alignRight', 'obj.alignTop', 'obj.alignV', 'obj.alignBottom', '-', 'obj.hide', 'obj.lock',
     ],

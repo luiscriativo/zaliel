@@ -149,6 +149,16 @@ export function nodeOut(ed: Editor, n: SceneNode, depth: number): Record<string,
     if (c.description) o.description = c.description;
     if (c.variant) o.variant = c.variant;
     if (c.properties?.length) o.properties = c.properties.map((p) => ({ name: p.name, type: p.type, default: p.type === 'swap' ? ed.findComponent(p.default)?.name ?? p.default : p.default }));
+    if (c.slot) {
+      const sl = c.slot;
+      o.slot = {
+        ...(sl.preferred?.length ? { preferred: sl.preferred.map((p) => ed.findComponent(p.componentId, p.library)?.name ?? p.componentId) } : {}),
+        ...(sl.description ? { description: sl.description } : {}),
+        ...(sl.min !== undefined ? { min: sl.min } : {}),
+        ...(sl.max !== undefined ? { max: sl.max } : {}),
+      };
+    }
+    if (c.slotOf) o.slotOf = ed.slotInfo(c.id)?.slot.name ?? c.slotOf;
     if (depth > 0) o.children = c.children.map((k) => nodeOut(ed, k, depth - 1));
     else if (c.children.length) o.childCount = c.children.length;
   }
@@ -161,7 +171,13 @@ export function nodeOut(ed: Editor, n: SceneNode, depth: number): Record<string,
     }
     if (Object.keys(names).length) o.bind = names;
   }
-  if (n.type === 'instance') instanceOut(ed, n, o);
+  if (n.type === 'instance') {
+    instanceOut(ed, n, o);
+    // conteúdo próprio dos slots: camadas reais da instância (editáveis por id como qualquer outra)
+    if (n.slots?.length) {
+      o.slots = Object.fromEntries(n.slots.map((h) => [ed.slotInfo(h.id)?.slot.name ?? h.name, depth > 0 ? { id: h.id, children: h.children.map((k) => nodeOut(ed, k, depth - 1)) } : { id: h.id, childCount: h.children.length }]));
+    }
+  }
   if (n.interactions?.length) {
     const it = n.interactions[0];
     o.link = { action: it.action, ...(it.target ? { to: it.target, toName: ed.model.index.get(it.target)?.name } : {}), ...(it.transition && it.transition !== 'instant' ? { transition: it.transition } : {}), ...(it.overlay ? { position: it.overlay.position, closeOutside: it.overlay.closeOutside } : {}) };

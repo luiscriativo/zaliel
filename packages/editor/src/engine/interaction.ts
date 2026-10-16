@@ -493,6 +493,13 @@ export class Interaction {
     if (sel?.type === 'text') return this.onTextEdit(sel.id);
     if (sel?.type === 'path' && pickTarget(ed, w, true) === sel.id) return ed.enterVectorEdit(sel.id);
     if (sel?.type === 'instance') {
+      // conteúdo de um slot: são camadas da instância, entra nelas como num frame
+      const slotted = pickInside(ed, w, sel.id);
+      if (slotted) {
+        ed.scope = ed.model.index.parentId(slotted) ?? sel.id;
+        ed.select([slotted]);
+        return;
+      }
       // texto dentro da instância: edita o override
       const path = hitPath(ed, w, 2 / ed.viewport.zoom);
       const inner = path[path.length - 1];

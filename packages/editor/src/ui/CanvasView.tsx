@@ -1,7 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { Minus, Plus, ClipboardPaste, Bold, Italic, Underline, Strikethrough, Eraser } from 'lucide-react';
-import { apply, multiply, nodeMatrix, parseHex, applyRunStyle, runsAfterEdit, segmentsIn, type Mat, type RunAttrs, type SceneNode, type TextNode, type TextRun } from '@zaliel/core';
-import type { Editor } from '../editor';
+import { apply, parseHex, applyRunStyle, runsAfterEdit, segmentsIn, type RunAttrs, type TextNode, type TextRun } from '@zaliel/core';
 import { useEditor } from './hooks';
 import { Interaction, findResolved } from '../engine/interaction';
 import { Menu, type MenuEntry } from './Menu';
@@ -177,7 +176,7 @@ function TextEditor({ id, onDone }: { id: string; onDone: () => void }) {
   }
 
   // matriz do texto no mundo (para instâncias, a do nó resolvido dentro da instância)
-  const m = inner ? innerMatrix(ed, instanceId!, id) : ed.model.index.worldMatrix(id);
+  const m = inner ? ed.innerMatrix(id) : ed.model.index.worldMatrix(id);
   const origin = ed.worldToScreen(apply(m, { x: 0, y: 0 }));
   const z = ed.viewport.zoom;
   const angle = (Math.atan2(m[1], m[0]) * 180) / Math.PI;
@@ -310,23 +309,4 @@ function TextEditor({ id, onDone }: { id: string; onDone: () => void }) {
     />
     </div>
   );
-}
-
-function innerMatrix(ed: Editor, instanceId: string, id: string): Mat {
-  const base = ed.model.index.worldMatrix(instanceId);
-  const inst = ed.model.index.get(instanceId);
-  if (!inst) return base;
-  const r = ed.resolve(inst);
-  const walk = (list: SceneNode[], m: Mat): Mat | null => {
-    for (const c of list) {
-      const cm = multiply(m, nodeMatrix(c));
-      if (c.id === id) return cm;
-      if ('children' in c) {
-        const f = walk(c.children, cm);
-        if (f) return f;
-      }
-    }
-    return null;
-  };
-  return ('children' in r && walk(r.children, base)) || base;
 }

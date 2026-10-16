@@ -39,6 +39,9 @@ import {
   type StyleSlot,
   type InstanceOverride,
   type Variable,
+  type SlotDef,
+  componentSlots,
+  createSlotHolder,
 } from '@zaliel/core';
 import type { Editor } from '../editor';
 // montagem de SVG fica em outro arquivo (precisa do DOMParser e do Skia)
@@ -115,6 +118,10 @@ export interface NodeSpec {
   description?: string;
   properties?: { name: string; type: string; default: string | boolean }[];
   bind?: { text?: string; visible?: string; component?: string };
+  /** Frame dentro de um componente: área livre que cada instância preenche (true, ou com sugeridos/limites). */
+  slot?: boolean | { preferred?: string[]; description?: string; min?: number; max?: number };
+  /** Instância: conteúdo de cada slot pelo nome do slot (as camadas tomam o lugar do conteúdo padrão). */
+  slots?: Record<string, NodeSpec[]>;
   // protótipo
   link?: { to?: string; action?: string; transition?: string; duration?: number; position?: string; background?: string; closeOutside?: boolean };
   meta?: Record<string, unknown>;
@@ -586,6 +593,42 @@ export class Converter {
     return { key: [...prefix, found!.id].join('/'), node: found! };
   }
 
+  /** Configuração de slot a partir da descrição curta (sugeridos pelo nome do componente). */
+  slotDef(v: NonNullable<NodeSpec['slot']>): SlotDef | undefined {
+    if (v === false) return undefined;
+    if (v === true || typeof v !== 'object') return {};
+    const def: SlotDef = {};
+    if (v.preferred?.length) {
+      def.preferred = v.preferred.map((name) => {
+        const { main, library } = this.findComponent(String(name));
+        return { componentId: main.id, ...(library ? { library } : {}) };
+      });
+    }
+    if (v.description) def.description = String(v.description);
+    if (typeof v.min === 'number' && v.min > 0) def.min = Math.round(v.min);
+    if (typeof v.max === 'number' && v.max > 0) def.max = Math.round(v.max);
+    return def;
+  }
+
+  /** Slot do componente pelo nome (ou id). */
+  findSlotIn(main: ContainerNode, name: string): ContainerNode {
+    const slots = componentSlots(main);
+    const want = name.trim().toLowerCase();
+    const hit = slots.find((s) => s.id === name || s.name.toLowerCase() === want);
+    if (!hit) throw new SpecError(`o componente ${main.name} não tem o slot “${name}” (tem: ${slots.map((s) => s.name).join(', ') || 'nenhum'})`);
+    return hit;
+  }
+
+  /** Frames de conteúdo dos slots de uma instância nova. */
+  private slotHolders(n: InstanceNode, main: ContainerNode, map: Record<string, NodeSpec[]>): ContainerNode[] {
+    return Object.entries(map).map(([name, specs]) => {
+      const slot = this.findSlotIn(main, name);
+      const holder = createSlotHolder(n, slot, false);
+      holder.children = (Array.isArray(specs) ? specs : [specs]).map((sp) => this.build(sp, !!slot.layout, false));
+      return holder;
+    });
+  }
+
   // ── Montagem ───────────────────────────────────────────────────────────────
 
   /**
@@ -858,6 +901,7 @@ export class Converter {
       name: main.name.includes('=') ? this.ed.finder.setOf?.(main.id, library)?.name ?? main.name : main.name,
     });
     this.instanceProps(n, main, library, spec);
+    if (spec.slots) n.slots = this.slotHolders(n, main, spec.slots);
     return n;
   }
 
@@ -959,6 +1003,7 @@ export class Converter {
     if (spec.absolute) n.absolute = true;
     if (spec.constraints) n.constraints = { horizontal: (spec.constraints.horizontal ?? 'left') as 'left', vertical: (spec.constraints.vertical ?? 'top') as 'top' };
     if (spec.grids && 'children' in n) n.grids = this.grids(spec.grids);
+    if (spec.slot !== undefined && n.type === 'frame') n.slot = this.slotDef(spec.slot);
     if (spec.meta) n.meta = { ...(n.meta ?? {}), ...spec.meta };
     // tamanho: número = fixo; "fill" = preenche o pai com auto layout; "hug" = abraça o conteúdo
     const wm = this.sizeMode(spec.width), hm = this.sizeMode(spec.height);
@@ -1017,6 +1062,8 @@ export class Converter {
     if (p.effects !== undefined || p.shadow !== undefined) set('effects', this.effects(p.effects ?? p.shadow));
     if (p.layout !== undefined && 'children' in n) set('layout', this.layout(p.layout, n.layout));
     if (p.grids && 'children' in n) set('grids', this.grids(p.grids));
+    if (p.slot !== undefined && n.type === 'frame') set('slot', this.slotDef(p.slot));
+    if (p.slots) throw new SpecError('o conteúdo dos slots de uma instância existente muda com fill_slot');
     if (p.constraints) set('constraints', { horizontal: p.constraints.horizontal ?? 'left', vertical: p.constraints.vertical ?? 'top' });
     if (p.meta) set('meta', { ...(n.meta ?? {}), ...p.meta });
     if (n.type === 'text') {

@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   ChevronRight, ChevronDown, Eye, EyeOff, Lock, LockOpen, Plus, Frame, Square, Circle, Minus, Triangle, Star, Type, Spline, Component, Diamond, Group, Image as ImageIcon, Rows3, Columns3,
-  Library, RefreshCw, Trash2, Search, FolderOpen, Layers2, SquaresUnite, SquaresSubtract, SquaresIntersect, SquaresExclude,
+  Library, RefreshCw, Trash2, Search, FolderOpen, Layers2, SquaresUnite, SquaresSubtract, SquaresIntersect, SquaresExclude, SquareDashed,
 } from 'lucide-react';
 import type { ContainerNode, SceneNode } from '@zaliel/core';
 import { useEditor } from './hooks';
@@ -103,6 +103,8 @@ export function kindIcon(n: SceneNode, size = 13) {
   const p = { size, strokeWidth: 1.6 };
   switch (n.type) {
     case 'frame':
+      // slot do componente e o conteúdo dele numa instância
+      if (n.slot || n.slotOf) return <SquareDashed {...p} />;
       return n.layout ? n.layout.direction === 'horizontal' ? <Columns3 {...p} /> : <Rows3 {...p} /> : <Frame {...p} />;
     case 'group':
       return <Group {...p} />;
@@ -132,6 +134,11 @@ export function kindIcon(n: SceneNode, size = 13) {
 }
 
 type Drop = { id: string; where: 'before' | 'after' | 'inside' } | null;
+
+/** Filhos mostrados na lista: os de containers e o conteúdo dos slots de uma instância. */
+function layerKids(n: SceneNode): SceneNode[] {
+  return n.type === 'instance' ? n.slots ?? [] : 'children' in n ? n.children : [];
+}
 
 function Layers() {
   const ed = useEditor('doc', 'selection', 'view');
@@ -179,7 +186,8 @@ function Layers() {
       for (let i = list.length - 1; i >= 0; i--) {
         const n = list[i];
         out.push({ n, depth, parent });
-        if ('children' in n && n.children.length && expanded.has(n.id)) visit(n.children, depth + 1, n.id);
+        const kids = layerKids(n);
+        if (kids.length && expanded.has(n.id)) visit(kids, depth + 1, n.id);
       }
     };
     visit(ed.page.children, 0, ed.pageId);
@@ -215,8 +223,10 @@ function Layers() {
     e.preventDefault();
     const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
     const y = (e.clientY - r.top) / r.height;
-    const container = 'children' in n && n.type !== 'group' ? true : n.type === 'group';
-    const where = container && y > 0.28 && y < 0.72 ? 'inside' : y < 0.5 ? 'before' : 'after';
+    const container = 'children' in n;
+    // o frame de um slot só recebe por dentro (a ordem dos slots na instância não é do usuário)
+    const holder = n.type === 'frame' && !!n.slotOf;
+    const where = holder ? 'inside' : container && y > 0.28 && y < 0.72 ? 'inside' : y < 0.5 ? 'before' : 'after';
     if (dragIds.current.some((id) => id === n.id || ed.model.index.isAncestor(id, n.id))) return setDrop(null);
     setDrop({ id: n.id, where });
   };
@@ -264,7 +274,8 @@ function Layers() {
       {rows.map(({ n, depth }) => {
         const isSel = selected.has(n.id);
         const inSel = !isSel && ed.model.index.ancestors(n.id).some((a) => selected.has(a.id));
-        const hasKids = 'children' in n && n.children.length > 0;
+        const hasKids = layerKids(n).length > 0;
+        const holder = n.type === 'frame' && !!n.slotOf;
         const open = expanded.has(n.id);
         const comp = n.type === 'component' || n.type === 'instance' || n.type === 'component-set';
         const dropCls = drop?.id === n.id ? `drop-${drop.where}` : '';
@@ -274,7 +285,7 @@ function Layers() {
             data-id={n.id}
             className={`layer ${isSel ? 'sel' : ''} ${inSel ? 'sel-child' : ''} ${depth === 0 ? 'top' : ''} ${ed.hover === n.id ? 'hover-canvas' : ''} ${n.visible === false ? 'hidden-node' : ''} ${dropCls}`}
             style={{ paddingLeft: 6 + depth * 14, ['--indent' as string]: `${8 + depth * 14}px` }}
-            draggable={renaming !== n.id}
+            draggable={renaming !== n.id && !holder}
             onDragStart={(e) => {
               dragIds.current = isSel ? ed.selection : [n.id];
               e.dataTransfer.effectAllowed = 'move';
@@ -366,7 +377,7 @@ export const LAYER_MENU: MenuEntry[] = [
   'obj.front', 'obj.forward', 'obj.backward', 'obj.back', '-',
   'obj.group', 'obj.ungroup', 'obj.frame', '-',
   'obj.autolayout', 'obj.removeAutolayout', '-',
-  'obj.component', 'obj.variants', 'obj.addVariant', 'obj.detach', 'obj.main', '-',
+  'obj.component', 'obj.variants', 'obj.addVariant', 'obj.slot', 'obj.detach', 'obj.main', '-',
   'obj.union', 'obj.subtract', 'obj.intersect', 'obj.exclude', 'obj.flatten', 'obj.editPoints', 'obj.textOnPath', '-',
   'obj.flipH', 'obj.flipV', '-',
   'obj.hide', 'obj.lock', '-',

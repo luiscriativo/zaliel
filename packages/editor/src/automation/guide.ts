@@ -51,6 +51,7 @@ const COMPONENTS = `# Components, variants and the library
   Or convert existing components with batch_design op "combine_variants".
 - Instances: {type:"instance", component:"Button", variant:{Type:"Secondary"}, props:{"Label":"Cancel", "Show icon":false}, width:"fill"} — "component" accepts the component/set name or id. Override inner layers by name path: overrides: {"Label": {text:"Hi"}, "Icon > Vector": {fill:"#fff"}}.
 - Change an instance later with op "update" (variant, props, overrides). Detach only when really needed.
+- SLOTS for containers whose content changes per use (app shell content area, card body, modal body, list, form): mark a frame inside the component with slot:true (or slot:{preferred:["List/Row"], min:1}), give it auto layout, and put placeholder content in it. Each instance fills it without detaching: {type:"instance", component:"Shell", slots:{"Content":[...NodeSpec]}} or later with op "fill_slot". Slot content are normal layers (update/delete them by id); editing the main component keeps every instance's slot content.
 - Naming: "Category/Name" (Button/Primary, Input/Text, Card/Product). Property names short and human ("Label", "Icon", "State").
 - Build bottom-up: tokens (variables + text styles) → atoms (button, input, badge, avatar, icon button) → molecules (list item, card, top bar, tab bar, modal) → screens using instances only.
 - Use variables for colors (create a "Theme" collection with Light/Dark modes) and text styles for the type scale; reference them with "$color/name" and textStyle:"Title".`;

@@ -12,7 +12,7 @@ import {
 import { useEditor } from './hooks';
 import { Check, IconBtn, NumberField, Section, Seg, Select, common, MIXED, type Maybe } from './controls';
 import { PaintPicker, paintCss } from './ColorPicker';
-import { InstanceSection, PropertiesSection, PropertyBindSection, VariantSetSection, VariantValuesSection } from './ComponentPanels';
+import { InstanceSection, InstanceSlotsSection, PropertiesSection, PropertyBindSection, SlotHolderSection, SlotSection, VariantSetSection, VariantValuesSection } from './ComponentPanels';
 import { LayoutGridSection } from './GridSection';
 import { PrototypePanel } from './PrototypePanel';
 import { LocalStyles, StyleButton, StyleRow, linkedStyle } from './Styles';
@@ -152,6 +152,9 @@ function NodeSections({ nodes }: { nodes: SceneNode[] }) {
 
       {nodes.length > 1 && <BooleanBar />}
       {single?.type === 'instance' && <InstanceSection inst={single} />}
+      {single?.type === 'instance' && <InstanceSlotsSection inst={single} />}
+      {single?.type === 'frame' && single.slotOf && <SlotHolderSection holder={single} />}
+      {single?.type === 'frame' && !single.slotOf && owner && <SlotSection node={single} />}
       {single?.type === 'component-set' && <VariantSetSection set={single} />}
       {single?.type === 'component-set' && <PropertiesSection owner={single} />}
       {single?.type === 'component' && variantSet && <VariantValuesSection comp={single} set={variantSet} />}

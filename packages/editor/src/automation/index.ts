@@ -403,6 +403,55 @@ export function createAutomation(ed: Editor) {
         if (Object.keys(patch).length) ed.updateProperty(owner.id, pid, patch);
         return { property: pid };
       }
+      case 'slot':
+      case 'make_slot': {
+        // frame dentro de um componente vira slot (outras camadas são embrulhadas num frame-slot)
+        const list = ids(op.ids ?? op.id);
+        const frames = list.filter((id) => idx.get(id)?.type === 'frame');
+        ed.convertToSlot(list);
+        const targets = frames.length === list.length ? list : [ed.selection[0]];
+        const t0 = targets[0] ? idx.get(targets[0]) : undefined;
+        if (t0?.type !== 'frame' || !t0.slot) throw new SpecError('não foi possível criar o slot (precisa ser um frame, ou camadas, dentro de um componente)');
+        const def = conv.slotDef({ preferred: op.preferred as string[] | undefined, description: op.description as string | undefined, min: op.min as number | undefined, max: op.max as number | undefined });
+        if (def && Object.keys(def).length) for (const id of targets) ed.updateSlot(id, def);
+        if (op.name && targets.length === 1) ed.run('Nome', [{ op: 'set', id: targets[0], key: 'name', value: String(op.name) }]);
+        setRef(op.ref, targets[0]);
+        return targets.length === 1 ? { id: targets[0] } : { ids: targets };
+      }
+      case 'fill_slot': {
+        const inst = node(op.instance ?? op.id);
+        if (inst.type !== 'instance') throw new SpecError('fill_slot precisa de uma instância em "instance"');
+        const main = ed.findComponent(inst.componentId, inst.library);
+        if (!main) throw new SpecError('componente da instância não encontrado');
+        const slot = conv.findSlotIn(main, String(op.slot ?? ''));
+        const specs = (op.nodes ?? (op.node ? [op.node] : [])) as NodeSpec[];
+        // padrão: as camadas tomam o lugar do conteúdo do slot; com append, entram depois dele
+        const append = op.append === true;
+        const cur = inst.slots?.find((h) => h.slotOf === slot.id);
+        if (!append) {
+          if (cur) ed.run('Limpar slot', cur.children.map((c) => ({ op: 'remove', id: c.id }) as Op));
+          else ed.clearSlot(inst.id, slot.id);
+        }
+        const holder = (idx.get(inst.id) as typeof inst).slots?.find((h) => h.slotOf === slot.id);
+        const parent = holder?.id ?? `${inst.id}/${slot.id}`;
+        const created: unknown[] = [];
+        for (const spec of specs) {
+          const built = conv.build(spec, !!slot.layout, false);
+          ed.run('Preencher slot', [...assets(), { op: 'insert', parent, index: 1e9, node: built }]);
+          created.push({ id: built.id, name: built.name, ...(spec.ref ? { ref: spec.ref } : {}) });
+        }
+        const after2 = (idx.get(inst.id) as typeof inst).slots?.find((h) => h.slotOf === slot.id);
+        return { slot: slot.name, holder: after2?.id, created };
+      }
+      case 'reset_slot': {
+        const inst = node(op.instance ?? op.id);
+        if (inst.type !== 'instance') throw new SpecError('reset_slot precisa de uma instância em "instance"');
+        const main = ed.findComponent(inst.componentId, inst.library);
+        if (!main) throw new SpecError('componente da instância não encontrado');
+        const slot = conv.findSlotIn(main, String(op.slot ?? ''));
+        ed.resetSlot(inst.id, slot.id);
+        return { ok: true };
+      }
       case 'detach': {
         ed.select(ids(op.ids ?? op.id));
         ed.detach();
@@ -441,7 +490,7 @@ export function createAutomation(ed: Editor) {
         return { ok: true };
       }
       default:
-        throw new SpecError(`operação desconhecida: ${kind || '(vazia)'} — use create, update, delete, move, duplicate, replace, group, frame, component, autolayout, remove_autolayout, ungroup, combine_variants, add_property, detach, boolean, flatten, reorder, link`);
+        throw new SpecError(`operação desconhecida: ${kind || '(vazia)'} — use create, update, delete, move, duplicate, replace, group, frame, component, autolayout, remove_autolayout, ungroup, combine_variants, add_property, slot, fill_slot, reset_slot, detach, boolean, flatten, reorder, link`);
     }
   }
 
@@ -786,7 +835,7 @@ export function createAutomation(ed: Editor) {
 
   // ── Lista de ferramentas ───────────────────────────────────────────────────
 
-  const NODE_HELP = 'Node description (see get_guidelines "overview"): {type, ref?, name?, x?, y?, width?: number|"fill"|"hug", height?, fill?, stroke?, strokeTop?/strokeRight?/strokeBottom?/strokeLeft? ("1px solid #e5e7eb", like CSS border-bottom), radius?, shadow?/effects?, opacity?, layout?: {direction, gap, padding, align, justify, wrap}, clip?, absolute?, children?: [...], text-only: text (or spans: ["plain ", {text:"bold part", weight:700, color?, italic?}] for mixed styles), font, size, weight, lineHeight, letterSpacing, align, color, autoResize; icon: icon, size, color, strokeWidth; image: src (file path or data URL), fit; svg: svg (markup); instance: component, variant, props, overrides; component: properties, bind; any: link:{to, action, transition}, fillStyle, textStyle, effectStyle}.';
+  const NODE_HELP = 'Node description (see get_guidelines "overview"): {type, ref?, name?, x?, y?, width?: number|"fill"|"hug", height?, fill?, stroke?, strokeTop?/strokeRight?/strokeBottom?/strokeLeft? ("1px solid #e5e7eb", like CSS border-bottom), radius?, shadow?/effects?, opacity?, layout?: {direction, gap, padding, align, justify, wrap}, clip?, absolute?, children?: [...], text-only: text (or spans: ["plain ", {text:"bold part", weight:700, color?, italic?}] for mixed styles), font, size, weight, lineHeight, letterSpacing, align, color, autoResize; icon: icon, size, color, strokeWidth; image: src (file path or data URL), fit; svg: svg (markup); instance: component, variant, props, overrides, slots: {"Slot name": [NodeSpec]}; component: properties, bind; frame inside a component: slot: true | {preferred, description, min, max}; any: link:{to, action, transition}, fillStyle, textStyle, effectStyle}.';
 
   const tools: Tool[] = [
     {
@@ -989,6 +1038,8 @@ export function createAutomation(ed: Editor) {
 - delete {id | ids}; move {id, parent?, index?, x?, y?}; duplicate {id, ref?, parent?, x?, y?, props?}; replace {id, node}
 - group|frame|component {ids, ref?, name?, props?} (wrap layers); autolayout {ids, layout?}; remove_autolayout {ids}; ungroup {id}
 - combine_variants {ids, variants?: {id: {Prop: Value}}, name?, ref?}; add_property {component, name, type: text|boolean|swap, default, bind?: {node, slot}}; detach {id}
+- slot {id|ids, preferred?: [component names], description?, min?, max?, name?, ref?} — a frame (or layers) INSIDE a component becomes a slot: a free area each instance fills with its own content without detaching
+- fill_slot {instance, slot: slot name, node|nodes: [NodeSpec], append?} — put content in an instance's slot (replaces the default content unless append: true); reset_slot {instance, slot}
 - boolean {ids, operation: union|subtract|intersect|exclude, ref?}; flatten {ids, ref?}; reorder {id, where: front|back|forward|backward}
 - link {from, to, action: navigate|overlay|back|close, transition?, position?}
 ${NODE_HELP}`,

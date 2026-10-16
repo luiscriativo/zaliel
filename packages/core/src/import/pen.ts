@@ -1,5 +1,6 @@
 // Importação de arquivos .pen (JSON). Componentes reutilizáveis viram componentes,
-// "ref" vira instância (ou cópia desanexada quando muda a estrutura), variáveis com
+// "ref" vira instância (ou cópia desanexada quando muda a estrutura; conteúdo novo num
+// frame com "slot" vira conteúdo do slot da instância, sem desanexar), variáveis com
 // temas viram coleções com modos e bibliotecas importadas entram como páginas.
 import type {
   AutoLayout,
@@ -423,6 +424,33 @@ export function penToDocument(input: PenInput, name: string): ImportResult {
     }
   };
 
+  /** Nó do componente pelo id absoluto (sem entrar em instâncias aninhadas). */
+  const findInComp = (root: P, abs: string, compPrefix: string): P | null => {
+    for (const c of (root.children ?? []) as P[]) {
+      if (q(compPrefix, String(c.id)) === abs) return c;
+      if (c.type !== 'ref') {
+        const r = findInComp(c, abs, compPrefix);
+        if (r) return r;
+      }
+    }
+    return null;
+  };
+
+  /**
+   * Overrides que só trocam os filhos de um frame-slot do componente: viram conteúdo do slot
+   * na instância (o resto continua decidindo se precisa de cópia).
+   */
+  const slotPatches = (comp: { node: P; prefix: string }, patches: Record<string, P>, refPrefix: string): Map<string, { slot: P; patch: P }> => {
+    const out = new Map<string, { slot: P; patch: P }>();
+    for (const [path, p] of Object.entries(patches)) {
+      if (path.includes('/') || !Array.isArray(p.children) || (p.type && p.type !== 'frame')) continue;
+      if (Object.keys(p).some((k) => k !== 'children' && k !== 'type' && k !== FROM)) continue;
+      const slot = findInComp(comp.node, q(refPrefix, path), comp.prefix);
+      if (slot?.type === 'frame' && slot.slot !== undefined && slot.slot !== false) out.set(path, { slot, patch: p });
+    }
+    return out;
+  };
+
   /** Troca ids de uma cópia expandida para não repetir os do componente. */
   const reid = (n: P, base: string, prefix: string) => {
     const own = typeof n[FROM] === 'string' ? n[FROM] : prefix;
@@ -477,6 +505,11 @@ export function penToDocument(input: PenInput, name: string): ImportResult {
         } : undefined;
         const children = convertList(n.children, { ...ctx, parentLayout: !!L, parentW: base.width || undefined, parentH: base.height || undefined });
         const out = { ...base, type: n.reusable ? 'component' : 'frame', children } as ContainerNode;
+        // frame-slot: área livre das instâncias, com os componentes sugeridos
+        if (!n.reusable && n.slot !== undefined && n.slot !== false) {
+          const preferred = (Array.isArray(n.slot) ? n.slot : []).map((r: unknown) => ({ componentId: q(ctx.prefix, String(r)) }));
+          out.slot = preferred.length ? { preferred } : {};
+        }
         const fills = paints(n.fill, ctx);
         if (fills.length) out.fills = fills;
         const st = strokesOf(n, ctx);
@@ -493,8 +526,11 @@ export function penToDocument(input: PenInput, name: string): ImportResult {
       case 'ref': {
         const target = q(ctx.prefix, String(n.ref ?? ''));
         const comp = reusable.get(target);
-        const patches = (n.descendants ?? {}) as Record<string, P>;
+        const allPatches = (n.descendants ?? {}) as Record<string, P>;
         const rootOverrides = Object.keys(n).filter((k) => !ROOT_INSTANCE_PROPS.has(k) && k !== 'theme' && k !== FROM);
+        // conteúdo de slots não obriga a desanexar
+        const slotted = comp ? slotPatches(comp, allPatches, ctx.prefix) : new Map<string, { slot: P; patch: P }>();
+        const patches = Object.fromEntries(Object.entries(allPatches).filter(([k]) => !slotted.has(k)));
         const needsCopy = !comp || Object.values(patches).some((p) => !isSimplePatch(p)) || rootOverrides.length > 0 || !!n.theme;
         if (comp && needsCopy) {
           // muda a estrutura ou o tema: vira uma cópia editável
@@ -502,7 +538,7 @@ export function penToDocument(input: PenInput, name: string): ImportResult {
           delete copy.reusable;
           for (const [k, v] of Object.entries(n)) if (!['type', 'ref', 'descendants', 'id', FROM].includes(k)) copy[k] = v;
           if (n.name === undefined) copy.name = comp.node.name;
-          applyPatches(copy, patches, comp.prefix, ctx.prefix);
+          applyPatches(copy, allPatches, comp.prefix, ctx.prefix);
           reid(copy, id.replace(/:/g, '_'), comp.prefix);
           copy.id = id.replace(/:/g, '_');
           const node = convert(copy, { ...ctx, prefix: comp.prefix });
@@ -542,6 +578,16 @@ export function penToDocument(input: PenInput, name: string): ImportResult {
           ov[k] = o;
         }
         if (Object.keys(ov).length) inst.overrides = ov;
+        if (comp && slotted.size) {
+          inst.slots = [...slotted.values()].map(({ slot, patch }) => {
+            const origin = typeof patch[FROM] === 'string' ? patch[FROM] : ctx.prefix;
+            const layoutKind = slot.layout ?? 'horizontal';
+            const sw = dim(slot.width, ctx), sh = dim(slot.height, ctx);
+            const kids = convertList((patch.children as P[]).map((c) => ({ ...c, [FROM]: c[FROM] ?? origin })), { ...ctx, parentLayout: layoutKind === 'vertical' || layoutKind === 'horizontal', parentW: sw.value, parentH: sh.value });
+            counts.slotContent = (counts.slotContent ?? 0) + 1;
+            return { id: `${id}~${q(comp.prefix, String(slot.id))}`, type: 'frame', name: String(slot.name ?? 'Slot'), slotOf: q(comp.prefix, String(slot.id)), x: 0, y: 0, width: sw.value ?? 0, height: sh.value ?? 0, children: kids } as ContainerNode;
+          });
+        }
         return inst;
       }
       case 'text': {

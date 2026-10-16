@@ -1,9 +1,10 @@
 // Componentes e instâncias. Uma instância guarda só o id do componente e os
 // overrides; a árvore que aparece na tela é "resolvida" a partir do componente.
-import type { ComponentProperty, ContainerNode, InstanceNode, InstanceOverride, SceneNode, ZalDocument } from './types';
+import type { AutoLayout, ComponentProperty, ContainerNode, InstanceNode, InstanceOverride, SceneNode, ZalDocument } from './types';
 import { applyConstraints, layoutNode, type MeasureText } from './layout';
 import { clone, uid } from './util';
-import { walk } from './document';
+import { reidentify, walk, type DocIndex } from './document';
+import type { Op } from './ops';
 
 export type FindComponent = ((id: string, library?: string) => ContainerNode | undefined) & {
   /** Conjunto de variantes que contém o componente (se ele for uma variante). */
@@ -160,6 +161,9 @@ export function resolveInstance(inst: InstanceNode, find: FindComponent, measure
   const overrides = inst.overrides ?? {};
   const props = propertyValues(propertyDefs(main, find, inst.library), inst);
   const swappedFrom = new Map<string, ContainerNode>();
+  // conteúdo próprio dos slots (camadas reais da instância: mantêm os ids)
+  const own = new Map((inst.slots ?? []).map((h) => [h.slotOf, h]));
+  const injected = new Set<SceneNode>();
 
   // Troca o componente de uma instância aninhada. Se ela estava no tamanho do componente
   // antigo, passa para o tamanho do novo (variantes de larguras diferentes não ficam cortadas).
@@ -225,7 +229,14 @@ export function resolveInstance(inst: InstanceNode, find: FindComponent, measure
         if (r) return { ...r, id: n.id, name: n.name, x: n.x, y: n.y, width: nested.width, height: nested.height, sizing: n.sizing, absolute: n.absolute, visible: n.visible, rotation: n.rotation, flipX: n.flipX, flipY: n.flipY };
         return n;
       }
-      if ('children' in n) n.children = resolveChildren(n.children);
+      if ('children' in n) {
+        const holder = n.slot ? own.get(n.id) : undefined;
+        if (holder) {
+          n.children = clone(holder.children);
+          for (const c of n.children) injected.add(c);
+          applySlotLook(n, holder);
+        } else n.children = resolveChildren(n.children);
+      }
       return n;
     });
   tree.children = resolveChildren(tree.children);
@@ -249,10 +260,15 @@ export function resolveInstance(inst: InstanceNode, find: FindComponent, measure
   if (tree.layout) {
     tree.sizing = { horizontal: 'fixed', vertical: 'fixed' };
     layoutNode(tree, ctx, true, true);
-  } else applyConstraints(tree, oldW, oldH, ctx);
+  } else {
+    // conteúdo de slot é novo para o componente: os frames com auto layout de dentro se arrumam
+    if (injected.size) for (const c of tree.children) layoutNode(c, ctx);
+    applyConstraints(tree, oldW, oldH, ctx);
+  }
 
-  // Prefixa os ids para não colidirem com os do documento
+  // Prefixa os ids para não colidirem com os do documento (o conteúdo dos slots é da instância e fica como está)
   walk(tree.children, (n) => {
+    if (injected.has(n)) return false;
     n.id = innerId(inst.id, n.id);
   });
 
@@ -312,9 +328,181 @@ export function overridableTexts(main: ContainerNode): { id: string; name: strin
 export function detachInstance(inst: InstanceNode, find: FindComponent, measureText?: MeasureText): ContainerNode | null {
   const r = resolveInstance(inst, find, measureText);
   if (!r) return null;
-  const copy = clone(r);
+  // ids novos em tudo, inclusive no conteúdo de slots de instâncias que estavam dentro
+  const copy = reidentify(r);
+  copy.id = uid();
+  // fora de um componente a marca de slot não significa nada
   walk(copy.children, (n) => {
-    n.id = uid();
+    if ('children' in n) delete n.slot;
   });
   return { ...copy, type: 'frame' };
+}
+
+// ── Slots ────────────────────────────────────────────────────────────────────
+
+/** Aparência do frame-slot que a instância pode mudar (como no Figma: preenchimento, contorno, efeitos, opacidade). */
+function applySlotLook(n: ContainerNode, holder: ContainerNode): void {
+  if (holder.fills) n.fills = clone(holder.fills);
+  if (holder.strokes) n.strokes = clone(holder.strokes);
+  if (holder.effects) n.effects = clone(holder.effects);
+  if (holder.opacity !== undefined) n.opacity = holder.opacity;
+  if (holder.visible === false) n.visible = false;
+}
+
+/** Slots de um componente (frames marcados), na ordem da árvore. Não entra em instâncias aninhadas. */
+export function componentSlots(main: ContainerNode): ContainerNode[] {
+  const out: ContainerNode[] = [];
+  walk(main.children, (n) => {
+    if (n.type === 'frame' && n.slot) out.push(n);
+  });
+  return out;
+}
+
+/** Frame-slot do componente pelo id. */
+export function findSlot(main: ContainerNode, slotId: string): ContainerNode | undefined {
+  return componentSlots(main).find((s) => s.id === slotId);
+}
+
+/**
+ * Conteúdo padrão de um slot, como camadas novas da instância (ids novos), já com os overrides
+ * simples que a instância tinha nelas (texto, cores, visibilidade).
+ */
+export function slotDefaultContent(inst: InstanceNode, slot: ContainerNode): SceneNode[] {
+  const overrides = inst.overrides ?? {};
+  const kids = clone(slot.children);
+  walk(kids, (n) => {
+    const o = overrides[n.id];
+    if (!o) return;
+    if (o.text !== undefined && n.type === 'text') {
+      n.text = o.text;
+      if (o.runs) n.runs = clone(o.runs);
+      else delete n.runs;
+    }
+    if (o.fills) n.fills = clone(o.fills);
+    if (o.strokes) n.strokes = clone(o.strokes);
+    if (o.visible !== undefined) n.visible = o.visible;
+    if (o.opacity !== undefined) n.opacity = o.opacity;
+    if (o.componentId && n.type === 'instance') n.componentId = o.componentId;
+  });
+  return kids.map((k) => reidentify(k));
+}
+
+/** Onde cada slot com conteúdo próprio fica dentro da instância (para gravar nas camadas reais). */
+export interface SlotPlacement {
+  /** Id do frame da instância que guarda o conteúdo. */
+  holder: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  layout?: AutoLayout;
+  clip?: boolean;
+  /** Posição e tamanho de cada camada do conteúdo, depois do layout do slot. */
+  children: { id: string; x: number; y: number; width: number; height: number }[];
+}
+
+export function placeSlots(inst: InstanceNode, find: FindComponent, measureText?: MeasureText): SlotPlacement[] {
+  if (!inst.slots?.length) return [];
+  const r = resolveInstance(inst, find, measureText);
+  if (!r) return [];
+  const byKey = new Map(inst.slots.map((h) => [innerId(inst.id, h.slotOf ?? ''), h]));
+  const out: SlotPlacement[] = [];
+  const visit = (list: SceneNode[], ox: number, oy: number) => {
+    for (const n of list) {
+      if (!('children' in n)) continue;
+      const holder = byKey.get(n.id);
+      if (holder) {
+        out.push({
+          holder: holder.id,
+          x: ox + n.x,
+          y: oy + n.y,
+          width: n.width,
+          height: n.height,
+          layout: n.layout,
+          clip: n.clip,
+          children: n.children.map((c) => ({ id: c.id, x: c.x, y: c.y, width: c.width, height: c.height })),
+        });
+        continue;
+      }
+      visit(n.children, ox + n.x, oy + n.y);
+    }
+  };
+  visit(r.children, 0, 0);
+  return out;
+}
+
+/** Ao trocar de variante, cada conteúdo de slot vai para o slot de mesmo nome na outra variante. */
+export function remapSlots(slots: ContainerNode[] | undefined, from: ContainerNode, to: ContainerNode): { holder: string; slotOf: string | null }[] {
+  return (slots ?? []).map((h) => {
+    const path = h.slotOf ? namePath(from, h.slotOf) : null;
+    const id = path && idAtPath(to, path);
+    const target = id ? findSlot(to, id) : undefined;
+    return { holder: h.id, slotOf: target ? target.id : null };
+  });
+}
+
+/** Id (de instância) do slot vazio: "instância/slot". Serve de destino antes de o slot ter conteúdo próprio. */
+export function slotTarget(instanceId: string, slotId: string): string {
+  return innerId(instanceId, slotId);
+}
+
+/** Frame da instância que guarda o conteúdo de um slot. */
+export function slotHolder(inst: InstanceNode, slotId: string): ContainerNode | undefined {
+  return inst.slots?.find((h) => h.slotOf === slotId);
+}
+
+/** Frame novo para o conteúdo de um slot (começa com o conteúdo padrão do componente). */
+export function createSlotHolder(inst: InstanceNode, slot: ContainerNode, withDefaults = true): ContainerNode {
+  return {
+    id: uid(),
+    type: 'frame',
+    name: slot.name,
+    slotOf: slot.id,
+    x: 0,
+    y: 0,
+    width: slot.width,
+    height: slot.height,
+    ...(slot.layout ? { layout: clone(slot.layout) } : {}),
+    ...(slot.clip ? { clip: true } : {}),
+    children: withDefaults ? slotDefaultContent(inst, slot) : [],
+  };
+}
+
+/**
+ * Operações que inserem ou movem para "instância/slot" (um slot ainda sem conteúdo próprio):
+ * cria antes o frame do slot na instância (com o conteúdo padrão) e manda a camada para ele.
+ */
+export function materializeSlots(index: DocIndex, find: FindComponent, ops: Op[]): Op[] {
+  if (!ops.some((o) => (o.op === 'insert' || o.op === 'move') && o.parent.includes('/'))) return ops;
+  const created = new Map<string, string>(); // "instância/slot" → frame criado
+  const out: Op[] = [];
+  for (const op of ops) {
+    if ((op.op !== 'insert' && op.op !== 'move') || !op.parent.includes('/')) {
+      out.push(op);
+      continue;
+    }
+    let holderId = created.get(op.parent);
+    if (!holderId) {
+      const [instId, ...rest] = op.parent.split('/');
+      const slotId = rest.join('/');
+      const inst = index.get(instId);
+      const main = inst?.type === 'instance' ? find(inst.componentId, inst.library) : undefined;
+      const slot = main && !rest.slice(1).length ? findSlot(main, slotId) : undefined;
+      if (!inst || inst.type !== 'instance' || !slot) {
+        out.push(op); // não é um slot: deixa a operação falhar com a mensagem de sempre
+        continue;
+      }
+      const existing = slotHolder(inst, slotId);
+      if (existing) holderId = existing.id;
+      else {
+        const holder = createSlotHolder(inst, slot);
+        out.push({ op: 'insert', parent: inst.id, index: (inst.slots?.length ?? 0) + created.size, node: holder });
+        holderId = holder.id;
+      }
+      created.set(op.parent, holderId);
+    }
+    // quem mirou "instância/slot" não conhecia a lista do slot: a camada entra no fim (depois do padrão)
+    out.push({ ...op, parent: holderId, index: 1e9 });
+  }
+  return out;
 }

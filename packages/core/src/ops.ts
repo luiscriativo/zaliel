@@ -1,7 +1,7 @@
 // Operações: a única forma de mudar um documento. Cada uma, ao ser aplicada,
 // devolve a sua inversa — é isso que dá desfazer/refazer e que outras
 // ferramentas podem usar para editar o arquivo.
-import type { Asset, Page, SceneNode, ZalDocument } from './types';
+import type { Asset, InstanceNode, Page, SceneNode, ZalDocument } from './types';
 import { DocIndex, ROOT } from './document';
 import { clone } from './util';
 
@@ -36,6 +36,19 @@ function setPath(obj: Record<string, unknown>, path: string[], value: unknown): 
 
 export class OpError extends Error {}
 
+/** Lista de filhos de um destino; instâncias ganham a lista de slots na primeira vez. */
+function targetList(index: DocIndex, parent: string): unknown[] | undefined {
+  const n = index.any(parent);
+  if (n && 'type' in n && n.type === 'instance') return ((n as InstanceNode).slots ??= []);
+  return index.siblings(parent);
+}
+
+/** Instância que ficou sem conteúdo de slot volta a não ter a lista (o arquivo fica igual ao de antes). */
+function tidySlots(index: DocIndex, parent: string): void {
+  const n = index.any(parent);
+  if (n && 'type' in n && n.type === 'instance' && n.slots && !n.slots.length) delete n.slots;
+}
+
 /** Aplica a operação no documento (mutável) e devolve a inversa. */
 export function applyOp(doc: ZalDocument, index: DocIndex, op: Op): Op {
   switch (op.op) {
@@ -49,7 +62,7 @@ export function applyOp(doc: ZalDocument, index: DocIndex, op: Op): Op {
       return { op: 'set', id: op.id, key: op.key, value: old };
     }
     case 'insert': {
-      const list = index.siblings(op.parent);
+      const list = targetList(index, op.parent);
       if (!list) throw new OpError(`Destino ${op.parent} não aceita filhos`);
       if (index.map.has(op.node.id)) throw new OpError(`Id duplicado ${op.node.id}`);
       const node = clone(op.node);
@@ -78,7 +91,10 @@ export function applyOp(doc: ZalDocument, index: DocIndex, op: Op): Op {
         }
         index.map.delete(node.id);
         for (const c of (node as Page).children) index.removeTree(c);
-      } else index.removeTree(node as SceneNode);
+      } else {
+        index.removeTree(node as SceneNode);
+        tidySlots(index, parent);
+      }
       return { op: 'insert', parent, index: i, node: clone(node) };
     }
     case 'move': {
@@ -86,7 +102,7 @@ export function applyOp(doc: ZalDocument, index: DocIndex, op: Op): Op {
       if (from === undefined || (from === ROOT) !== (op.parent === ROOT)) throw new OpError(`Não dá para mover ${op.id}`);
       if (op.parent !== ROOT && (op.parent === op.id || index.isAncestor(op.id, op.parent))) throw new OpError('Não dá para mover um nó para dentro dele mesmo');
       const src = index.siblings(from)!;
-      const dst = index.siblings(op.parent);
+      const dst = targetList(index, op.parent);
       if (!dst) throw new OpError(`Destino ${op.parent} não aceita filhos`);
       const i = src.findIndex((n) => n.id === op.id);
       const [node] = (src as unknown[]).splice(i, 1) as SceneNode[];
@@ -95,6 +111,7 @@ export function applyOp(doc: ZalDocument, index: DocIndex, op: Op): Op {
       if (op.parent !== ROOT) {
         index.removeTree(node);
         index.addTree([node], op.parent, index.pageOf(op.parent)!);
+        tidySlots(index, from);
       }
       return { op: 'move', id: op.id, parent: from, index: i };
     }

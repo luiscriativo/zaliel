@@ -118,7 +118,13 @@ export function isContainer(n: SceneNode | Page | undefined): n is ContainerNode
 }
 
 export function childrenOf(n: SceneNode | Page | undefined): SceneNode[] | undefined {
+  if (n && 'type' in n && n.type === 'instance') return n.slots;
   return n && 'children' in n ? n.children : undefined;
+}
+
+/** Filhos que ficam no índice: os de containers e o conteúdo dos slots de instâncias. */
+function indexedChildren(n: SceneNode): SceneNode[] | undefined {
+  return n.type === 'instance' ? n.slots : 'children' in n ? n.children : undefined;
 }
 
 // ── Índice: id → nó, id → pai ────────────────────────────────────────────────
@@ -150,14 +156,15 @@ export class DocIndex {
     this.cache = null;
     for (const n of nodes) {
       this.map.set(n.id, { node: n, parent, page });
-      if ('children' in n) this.addTree(n.children, n.id, page);
+      const kids = indexedChildren(n);
+      if (kids) this.addTree(kids, n.id, page);
     }
   }
 
   removeTree(n: SceneNode): void {
     this.cache = null;
     this.map.delete(n.id);
-    if ('children' in n) for (const c of n.children) this.removeTree(c);
+    for (const c of indexedChildren(n) ?? []) this.removeTree(c);
   }
 
   get(id: string): SceneNode | undefined {
@@ -262,7 +269,7 @@ export function reidentify<T extends SceneNode>(node: T, map = new Map<string, s
     const id = uid();
     map.set(n.id, id);
     n.id = id;
-    if ('children' in n) n.children.forEach(visit);
+    indexedChildren(n)?.forEach(visit);
   };
   visit(copy);
   return copy;

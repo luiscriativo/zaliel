@@ -26,6 +26,13 @@ export class Model {
   measureText?: MeasureText;
   /** Medida das instâncias que abraçam o conteúdo (o editor sabe achar os componentes). */
   measureInstance?: LayoutContext['measureInstance'];
+  /** Posição do conteúdo dos slots dentro das instâncias. */
+  placeSlots?: LayoutContext['placeSlots'];
+  /**
+   * Ajusta as operações antes de aplicar (o editor usa para criar o frame de um slot na primeira
+   * vez que algo entra nele).
+   */
+  prepare?: (ops: Op[]) => Op[];
   private listeners = new Set<Listener>();
   private limit = 300;
   private mergeKey: string | null = null;
@@ -73,6 +80,7 @@ export class Model {
    */
   transact(label: string, ops: Op[], opts: { merge?: string; selection?: string[]; layout?: boolean } = {}): Op[] {
     if (!ops.length) return [];
+    if (this.prepare) ops = this.prepare(ops);
     const undo: Op[] = [];
     const redo: Op[] = [];
     try {
@@ -160,7 +168,7 @@ export class Model {
    * Com `pageIds`, só nessas páginas (arquivos grandes abrem bem mais rápido).
    */
   refreshLayout(pageIds?: string[]): void {
-    const ctx = { measureText: this.measureText, measureInstance: this.measureInstance, changes: [] as Change[] };
+    const ctx = { measureText: this.measureText, measureInstance: this.measureInstance, placeSlots: this.placeSlots, changes: [] as Change[] };
     for (const page of this.doc.pages) {
       if (pageIds && !pageIds.includes(page.id)) continue;
       for (const n of page.children) layoutNode(n, ctx);
@@ -190,9 +198,42 @@ export class Model {
     // remoções e movimentos: o pai antigo também precisa de layout, então revisa a página toda
     if (ops.some((o) => o.op === 'remove' || o.op === 'move' || o.op === 'doc')) {
       for (const page of this.doc.pages) for (const n of page.children) roots.add(n);
+    } else {
+      // mudou algo num componente: as instâncias dele (em qualquer página) se medem e posicionam os slots de novo
+      const comps = this.touchedComponents(roots);
+      if (comps.size) for (const page of this.doc.pages) for (const n of page.children) if (!roots.has(n) && usesAny(n, comps)) roots.add(n);
     }
-    const ctx = { measureText: this.measureText, measureInstance: this.measureInstance, changes: [] as Change[] };
+    const ctx = { measureText: this.measureText, measureInstance: this.measureInstance, placeSlots: this.placeSlots, changes: [] as Change[] };
     for (const r of roots) if (this.index.get(r.id)) layoutNode(r, ctx);
     return ctx.changes;
   }
+
+  /**
+   * Componentes dentro das árvores tocadas, mais os que usam algum deles (uma instância de
+   * um componente mudado dentro de outro componente também muda).
+   */
+  private touchedComponents(roots: Set<SceneNode>): Set<string> {
+    const comps = new Set<string>();
+    const collect = (n: SceneNode) => {
+      if (n.type === 'component') comps.add(n.id);
+      if ('children' in n) n.children.forEach(collect);
+    };
+    for (const r of roots) if (r.type === 'component' || r.type === 'component-set') collect(r);
+    if (!comps.size) return comps;
+    const all = this.index.components();
+    for (let grew = true; grew; ) {
+      grew = false;
+      for (const c of all) if (!comps.has(c.id) && usesAny(c, comps)) {
+        comps.add(c.id);
+        grew = true;
+      }
+    }
+    return comps;
+  }
+}
+
+/** A árvore tem instância de algum destes componentes (inclusive no conteúdo de slots)? */
+function usesAny(n: SceneNode, comps: Set<string>): boolean {
+  if (n.type === 'instance') return comps.has(n.componentId) || (n.slots ?? []).some((h) => usesAny(h, comps));
+  return 'children' in n && n.children.some((c) => usesAny(c, comps));
 }

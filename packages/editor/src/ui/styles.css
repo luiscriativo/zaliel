@@ -43,6 +43,7 @@
   --accent-soft: rgba(199, 164, 98, 0.13);
   --accent-line: rgba(199, 164, 98, 0.45);
   --component: #a88bd0;
+  --slot: #d77aa9;
   --success: #7fae7a;
   --warn: #d6a54b;
   --danger: #d9705a;
@@ -72,6 +73,7 @@
   --accent-soft: rgba(140, 106, 44, 0.1);
   --accent-line: rgba(140, 106, 44, 0.4);
   --component: #7d5ba6;
+  --slot: #b0447c;
   --success: #4d7f49;
   --warn: #9a6a12;
   --danger: #b2442e;
@@ -1860,6 +1862,20 @@ kbd {
   background: color-mix(in srgb, var(--component) 14%, transparent);
   color: var(--component);
   font-size: 11px;
+}
+.slot-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  border: 0;
+  cursor: pointer;
+  background: color-mix(in srgb, var(--slot) 14%, transparent);
+  color: var(--slot);
+  font: inherit;
+  font-size: 11px;
+}
+.slot-chip:hover {
+  background: color-mix(in srgb, var(--slot) 24%, transparent);
 }
 .prop-def + .prop-def {
   margin-top: 8px;
