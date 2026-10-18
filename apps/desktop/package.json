@@ -1,7 +1,7 @@
 {
   "name": "@zaliel/desktop",
   "productName": "Zaliel",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": true,
   "description": "Editor de interfaces offline — sem IA, sem nuvem.",
   "author": "Luis Melo <luiscriativo@gmail.com>",
