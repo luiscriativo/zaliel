@@ -328,21 +328,34 @@ export function drawOverlay(host: CanvasHost, canvas: Canvas, ck: CanvasKit): vo
   const gd = it?.drag?.kind === 'guide' ? it.drag : null;
   if (guides.length || gd) {
     const gp = stroke(GUIDE, 1);
-    const line = (axis: 'x' | 'y', at: number) => {
+    // selecionada: mais grossa, com o valor ao lado (Delete apaga)
+    const gsel = stroke(GUIDE, 2);
+    // arrastando para a zona de remoção: a guia some aos poucos, avisando que vai ser apagada
+    const gdel = stroke(GUIDE, 1, 0.35);
+    const sel = ed.activeGuide;
+    const line = (axis: 'x' | 'y', at: number, paint = gp) => {
       const s = ed.worldToScreen({ x: at, y: at });
-      if (axis === 'x') canvas.drawLine(Math.round(s.x) + 0.5, 0, Math.round(s.x) + 0.5, size.height, gp);
-      else canvas.drawLine(0, Math.round(s.y) + 0.5, size.width, Math.round(s.y) + 0.5, gp);
+      if (axis === 'x') canvas.drawLine(Math.round(s.x) + 0.5, 0, Math.round(s.x) + 0.5, size.height, paint);
+      else canvas.drawLine(0, Math.round(s.y) + 0.5, size.width, Math.round(s.y) + 0.5, paint);
     };
-    guides.forEach((g, i) => gd?.index !== i && line(g.axis, g.at));
-    if (gd) {
-      line(gd.axis, gd.at);
-      const s = ed.worldToScreen({ x: gd.at, y: gd.at });
-      const p = label(host, fmt(gd.at).toString(), '#ffffff', 10.5);
+    guides.forEach((g, i) => gd?.index !== i && line(g.axis, g.at, i === sel ? gsel : gp));
+    // etiqueta com o valor: ao lado da guia, na altura do cursor (ou junto da régua, se não está arrastando)
+    const tag = (axis: 'x' | 'y', at: number, text: string, alpha = 1, atPointer = true) => {
+      const s = ed.worldToScreen({ x: at, y: at });
+      const p = label(host, text, '#ffffff', 10.5);
       const tw = Math.ceil(p.getMaxIntrinsicWidth()) + 10;
-      const x = gd.axis === 'x' ? s.x + 6 : (it?.pointer.x ?? 0) + 12;
-      const y = gd.axis === 'y' ? s.y + 6 : (it?.pointer.y ?? 0) + 12;
-      canvas.drawRRect(ck.RRectXY(ck.LTRBRect(x, y, x + tw, y + 17), 3, 3), fill(GUIDE));
+      const x = axis === 'x' ? s.x + 6 : atPointer ? (it?.pointer.x ?? 0) + 12 : RULER + 6;
+      const y = axis === 'y' ? s.y + 6 : atPointer ? (it?.pointer.y ?? 0) + 12 : RULER + 6;
+      canvas.drawRRect(ck.RRectXY(ck.LTRBRect(x, y, x + tw, y + 17), 3, 3), fill(GUIDE, alpha));
       canvas.drawParagraph(p, x + 5, y + 2);
+    };
+    if (sel !== null && !gd) tag(guides[sel].axis, guides[sel].at, fmt(guides[sel].at).toString(), 1, false);
+    if (gd?.remove && gd.index !== null) {
+      line(gd.axis, gd.at, gdel);
+      tag(gd.axis, gd.at, 'Soltar para remover', 0.85);
+    } else if (gd && !gd.remove) {
+      line(gd.axis, gd.at, gd.index !== null ? gsel : gp);
+      tag(gd.axis, gd.at, fmt(gd.at).toString());
     }
   }
 

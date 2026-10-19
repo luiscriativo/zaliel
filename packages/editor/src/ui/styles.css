@@ -279,6 +279,11 @@ button {
 .titlebar > * {
   -webkit-app-region: no-drag;
 }
+/* desliga por um instante as áreas de arrastar para a janela recalculá-las (troca de tema) */
+.regions-reset .titlebar,
+.regions-reset .titlebar * {
+  -webkit-app-region: no-drag !important;
+}
 .titlebar .drag {
   -webkit-app-region: drag;
   flex: 1;

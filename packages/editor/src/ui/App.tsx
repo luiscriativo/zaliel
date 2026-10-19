@@ -44,8 +44,17 @@ export function App({ assets }: { assets: HostAssets }) {
   }, [ed, assets]);
 
   // tema
+  const themed = useRef(false);
   useEffect(() => {
     document.documentElement.dataset.theme = ed.theme;
+    if (!themed.current) {
+      themed.current = true;
+      return;
+    }
+    // trocar a aparência da janela (sobretudo no macOS) deixa as áreas de arrastar da barra de título
+    // desatualizadas, cobrindo as ferramentas; desligar e religar faz o Chromium mandá-las de novo
+    const timers = [0, 300, 1000].map((ms) => setTimeout(resetDragRegions, ms));
+    return () => timers.forEach(clearTimeout);
   }, [ed.theme]);
   useEffect(() => {
     const mq = window.matchMedia('(prefers-color-scheme: dark)');
@@ -105,6 +114,13 @@ export function App({ assets }: { assets: HostAssets }) {
       {ed.presenting && <Presentation />}
     </div>
   );
+}
+
+/** Faz a janela recalcular as áreas de arrastar (-webkit-app-region). */
+function resetDragRegions() {
+  const root = document.documentElement;
+  root.classList.add('regions-reset');
+  requestAnimationFrame(() => requestAnimationFrame(() => root.classList.remove('regions-reset')));
 }
 
 function StatusBar() {
@@ -228,6 +244,26 @@ function useKeyboard(ed: Editor) {
           e.preventDefault();
           const d = e.shiftKey ? ed.settings.bigNudge : ed.settings.nudge;
           it.vector.nudge(e.key === 'ArrowLeft' ? -d : e.key === 'ArrowRight' ? d : 0, e.key === 'ArrowUp' ? -d : e.key === 'ArrowDown' ? d : 0);
+          return;
+        }
+      }
+      // guia selecionada (clique nela): Delete apaga, setas movem, Esc desmarca
+      if (ed.activeGuide !== null && !e.ctrlKey && !e.metaKey && !e.altKey) {
+        if (e.key === 'Delete' || e.key === 'Backspace') {
+          e.preventDefault();
+          ed.deleteSelectedGuide();
+          return;
+        }
+        const g = ed.page.guides![ed.activeGuide];
+        const keys = g.axis === 'x' ? ['ArrowLeft', 'ArrowRight'] : ['ArrowUp', 'ArrowDown'];
+        if (keys.includes(e.key)) {
+          e.preventDefault();
+          const d = e.shiftKey ? ed.settings.bigNudge : ed.settings.nudge;
+          ed.nudgeGuide(e.key === keys[0] ? -d : d);
+          return;
+        }
+        if (e.key === 'Escape' && !it?.drag) {
+          ed.selectGuide(null);
           return;
         }
       }

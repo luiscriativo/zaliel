@@ -19,6 +19,8 @@ interface WinState {
   dirty: boolean;
   allowClose: boolean;
   path: string | null;
+  /** Último tema aplicado às cores nativas (só reaplica quando muda). */
+  theme?: 'light' | 'dark';
 }
 const state = new WeakMap<BrowserWindow, WinState>();
 const pendingOpen: string[] = [];
@@ -427,7 +429,11 @@ function registerIpc() {
     if (isMac) {
       win.setDocumentEdited(s.dirty);
       if (s.path) win.setRepresentedFilename(s.path);
-    } else {
+    }
+    // cores nativas só quando o tema muda: mexer nelas a cada título/alteração refaz o quadro da janela à toa
+    if (st && st.theme === s.theme) return;
+    if (st) st.theme = s.theme;
+    if (!isMac) {
       try {
         win.setTitleBarOverlay({ ...themeColors(s.theme), height: 40 });
       } catch {

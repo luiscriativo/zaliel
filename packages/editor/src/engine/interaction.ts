@@ -39,6 +39,8 @@ export interface LinkDrag {
 
 /** Largura das réguas, em px de tela. */
 export const RULER = 20;
+/** Folga (px de tela) além da régua em que soltar a guia ainda apaga. */
+const GUIDE_REMOVE_SLACK = 16;
 
 export type Handle = 'nw' | 'n' | 'ne' | 'e' | 'se' | 's' | 'sw' | 'w';
 const HANDLE_DIR: Record<Handle, [number, number]> = {
@@ -67,7 +69,7 @@ type Drag =
   | { kind: 'rotate'; id: string; center: Point; startAngle: number; rot0: number }
   | { kind: 'create'; tool: Tool; start: Point }
   | { kind: 'pen-handle'; index: number }
-  | { kind: 'guide'; axis: 'x' | 'y'; index: number | null; at: number }
+  | { kind: 'guide'; axis: 'x' | 'y'; index: number | null; at: number; moved?: boolean; remove?: boolean }
   | { kind: 'vector' }
   | { kind: 'link' };
 
@@ -222,16 +224,37 @@ export class Interaction {
     return Math.round(v / step) * step;
   }
 
+  /**
+   * Soltar aqui apaga a guia: em cima da régua dela (com uma folga, para não precisar acertar a faixa
+   * de 20 px) ou fora do canvas, como no Figma.
+   */
+  guideRemoves(axis: 'x' | 'y', p: Point): boolean {
+    const { width, height } = this.editor.host?.size() ?? { width: Infinity, height: Infinity };
+    const zone = RULER + GUIDE_REMOVE_SLACK;
+    if (p.x > width || p.y > height || p.x < 0 || p.y < 0) return true;
+    return axis === 'y' ? p.y < zone : p.x < zone;
+  }
+
   private finishGuide(d: Extract<Drag, { kind: 'guide' }>, p: Point) {
     const ed = this.editor;
     const guides = [...(ed.page.guides ?? [])];
-    // soltar em cima da régua apaga a guia
-    const onRuler = d.axis === 'y' ? p.y < RULER : p.x < RULER;
+    const remove = this.guideRemoves(d.axis, p);
     if (d.index !== null) {
-      if (onRuler) guides.splice(d.index, 1);
-      else guides[d.index] = { axis: d.axis, at: d.at };
-      ed.setGuides(guides, onRuler ? 'Remover guia' : 'Mover guia');
-    } else if (!onRuler) ed.setGuides([...guides, { axis: d.axis, at: d.at }], 'Adicionar guia');
+      // só um clique: a guia fica selecionada, sem mexer no histórico
+      if (!d.moved) return;
+      if (remove) {
+        guides.splice(d.index, 1);
+        ed.setGuides(guides, 'Remover guia');
+        ed.selectGuide(null);
+      } else {
+        guides[d.index] = { axis: d.axis, at: d.at };
+        ed.setGuides(guides, 'Mover guia');
+        ed.selectGuide(d.index);
+      }
+    } else if (!remove) {
+      ed.setGuides([...guides, { axis: d.axis, at: d.at }], 'Adicionar guia');
+      ed.selectGuide(guides.length);
+    }
   }
 
   // ── Eventos ────────────────────────────────────────────────────────────────
@@ -265,6 +288,8 @@ export class Interaction {
     this.world = w;
     if (e.button === 2) return; // menu de contexto trata
     this.el.setPointerCapture(e.pointerId);
+    // clicar em qualquer outra coisa tira a seleção da guia (o ramo das guias seleciona de novo)
+    if (ed.selectedGuide !== null) ed.selectGuide(null);
 
     if (ed.tool === 'comment' && e.button === 0 && !this.space) {
       ed.startComment(w);
@@ -281,7 +306,7 @@ export class Interaction {
     // réguas e guias
     const ruler = this.rulerAt(p);
     if (ruler) {
-      this.drag = { kind: 'guide', axis: ruler, index: null, at: this.guideValue(ruler, w) };
+      this.drag = { kind: 'guide', axis: ruler, index: null, at: this.guideValue(ruler, w), remove: true };
       return;
     }
 
@@ -313,6 +338,7 @@ export class Interaction {
       if (gi !== null) {
         const g = ed.page.guides![gi];
         this.drag = { kind: 'guide', axis: g.axis, index: gi, at: g.at };
+        ed.selectGuide(gi);
         return;
       }
     }
@@ -367,7 +393,11 @@ export class Interaction {
     }
     switch (d.kind) {
       case 'guide':
+        if (!d.moved && Math.hypot(p.x - this.downAt.x, p.y - this.downAt.y) < 3) break;
+        d.moved = true;
         d.at = this.guideValue(d.axis, w);
+        d.remove = this.guideRemoves(d.axis, p);
+        this.el.style.cursor = d.remove ? 'default' : d.axis === 'x' ? 'ew-resize' : 'ns-resize';
         this.redraw();
         break;
       case 'vector':

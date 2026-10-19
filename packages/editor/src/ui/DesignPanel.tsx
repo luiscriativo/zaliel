@@ -99,7 +99,7 @@ function PageSection() {
         <div className="muted" style={{ lineHeight: 1.55 }}>
           {ed.page.guides?.length ? `${ed.page.guides.length} guia${ed.page.guides.length === 1 ? '' : 's'} nesta página. ` : ''}
           {ed.settings.rulers ? (
-            <>Arraste a partir das réguas para criar guias; arraste de volta para a régua para apagar.</>
+            <>Arraste a partir das réguas para criar guias; arraste de volta para a régua (ou clique na guia e aperte Delete) para apagar.</>
           ) : (
             <>
               <Ruler size={11} style={{ verticalAlign: -1 }} /> Réguas ocultas — <a style={{ color: 'var(--accent)', cursor: 'pointer' }} onClick={() => ed.setSettings({ rulers: true })}>mostrar (Shift+R)</a>

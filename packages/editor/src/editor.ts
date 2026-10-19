@@ -199,6 +199,8 @@ export class Editor {
   filePath: string | null = null;
   pageId: string;
   selection: string[] = [];
+  /** Guia da página selecionada (índice em page.guides); exclui a seleção de camadas. */
+  selectedGuide: number | null = null;
   hover: string | null = null;
   tool: Tool = 'move';
   viewport: Viewport = { zoom: 1, x: 0, y: 0 };
@@ -1320,6 +1322,7 @@ export class Editor {
     if (uniq.length === this.selection.length && uniq.every((id, i) => id === this.selection[i])) return;
     if (this.vectorEdit && !(uniq.length === 1 && uniq[0] === this.vectorEdit)) this.exitVectorEdit();
     this.selection = uniq;
+    if (uniq.length) this.selectedGuide = null;
     if (this.scope && !uniq.every((id) => this.model.index.isAncestor(this.scope!, id))) this.scope = null;
     this.emit('selection');
   }
@@ -1373,6 +1376,7 @@ export class Editor {
     this.pageId = id;
     this.layoutPage(id);
     this.selection = [];
+    this.selectedGuide = null;
     this.scope = null;
     this.emit('selection', 'doc');
     this.zoomToFit(false);
@@ -2246,6 +2250,46 @@ export class Editor {
 
   setGuides(guides: Guide[], label = 'Guias'): void {
     this.run(label, [{ op: 'set', id: this.pageId, key: 'guides', value: guides.length ? guides : undefined }]);
+  }
+
+  /** Seleciona uma guia (como no Figma: clicar nela) — tira a seleção das camadas. */
+  selectGuide(index: number | null): void {
+    const valid = index !== null && index >= 0 && index < (this.page.guides?.length ?? 0) ? index : null;
+    if (valid === this.selectedGuide) return;
+    this.selectedGuide = valid;
+    if (valid !== null && this.selection.length) {
+      this.selection = [];
+      this.scope = null;
+    }
+    this.emit('selection', 'view');
+  }
+
+  /** Guia selecionada que ainda existe (o desfazer pode ter tirado). */
+  get activeGuide(): number | null {
+    const i = this.selectedGuide;
+    return i !== null && i < (this.page.guides?.length ?? 0) ? i : null;
+  }
+
+  /** Apaga a guia selecionada; devolve se havia uma. */
+  deleteSelectedGuide(): boolean {
+    const i = this.activeGuide;
+    this.selectedGuide = null;
+    if (i === null) return false;
+    const guides = [...(this.page.guides ?? [])];
+    guides.splice(i, 1);
+    this.setGuides(guides, 'Remover guia');
+    this.emit('selection', 'view');
+    return true;
+  }
+
+  /** Move a guia selecionada pelas setas. */
+  nudgeGuide(delta: number): boolean {
+    const i = this.activeGuide;
+    if (i === null) return false;
+    const guides = [...(this.page.guides ?? [])];
+    guides[i] = { ...guides[i], at: Math.round((guides[i].at + delta) * 100) / 100 };
+    this.setGuides(guides, 'Mover guia');
+    return true;
   }
 
   // ── Estilos ────────────────────────────────────────────────────────────────
