@@ -5,7 +5,7 @@
   "private": true,
   "description": "Editor de interfaces offline — sem IA, sem nuvem.",
   "author": "Luis Melo <luiscriativo@gmail.com>",
-  "license": "UNLICENSED",
+  "license": "MIT",
   "homepage": "https://github.com/luiscriativo/zaliel",
   "main": "out/main/index.js",
   "scripts": {

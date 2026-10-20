@@ -114,4 +114,4 @@ Os arquivos seguem o padrão `Zaliel-<versão>-<sistema>-<arquitetura>`.
 
 ## Licença
 
-Proprietária — veja [LICENSE](LICENSE). Componentes de terceiros mantêm as próprias licenças (Skia: BSD-3; opentype.js: MIT; Inter e Cormorant Garamond: OFL 1.1).
+MIT — veja [LICENSE](LICENSE). Uso livre, inclusive comercial, para o editor e para os arquivos criados com ele. Componentes de terceiros mantêm as próprias licenças (Skia: BSD-3; opentype.js: MIT; Inter e Cormorant Garamond: OFL 1.1).
