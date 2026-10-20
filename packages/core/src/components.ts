@@ -260,6 +260,8 @@ export function resolveInstance(inst: InstanceNode, find: FindComponent, measure
   if (tree.layout) {
     tree.sizing = { horizontal: 'fixed', vertical: 'fixed' };
     layoutNode(tree, ctx, true, true);
+    // as camadas absolutas (fora do auto layout) seguem as constraints, como num frame comum
+    applyConstraints(tree, oldW, oldH, ctx);
   } else {
     // conteúdo de slot é novo para o componente: os frames com auto layout de dentro se arrumam
     if (injected.size) for (const c of tree.children) layoutNode(c, ctx);

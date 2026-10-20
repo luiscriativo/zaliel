@@ -450,6 +450,9 @@ export class Editor {
       } else r = resolveInstance(n as InstanceNode, this.finder, this.host?.measureText) ?? missingComponent(n as InstanceNode);
       this.resolved.set(key, r);
     }
+    // a chave não leva a posição: uma cópia em outro lugar (exportação e captura desenham na origem,
+    // sem girar) receberia a posição do original e sairia fora da imagem
+    if (r.x !== n.x || r.y !== n.y || r.rotation !== n.rotation) return { ...r, x: n.x, y: n.y, rotation: n.rotation } as SceneNode;
     return r;
   };
 
@@ -1432,6 +1435,44 @@ export class Editor {
 
   zoomTo(zoom: number): void {
     this.zoomAt(zoom / this.viewport.zoom);
+  }
+
+  /** Quando o usuário mexeu na vista por último (pan/zoom à mão); a vista não é tirada dele logo depois. */
+  userViewAt = 0;
+  private glide = 0;
+
+  /**
+   * Leva a vista até a área com animação, sem mudar o zoom se ela já cabe nele. Não faz nada se a área
+   * já está à vista ou se o usuário mexeu na vista há pouco (usado para acompanhar a automação).
+   */
+  glideTo(r: Rect, padding = 80): void {
+    const size = this.host?.size();
+    if (!size || performance.now() - this.userViewAt < 4000) return;
+    const v = this.viewport;
+    const sx = r.x * v.zoom + v.x, sy = r.y * v.zoom + v.y, sw = r.width * v.zoom, sh = r.height * v.zoom;
+    const visible = sx >= 0 && sy >= 0 && sx + sw <= size.width && sy + sh <= size.height;
+    // à vista e num tamanho legível: deixa como está
+    const tiny = Math.max(sw, sh) < Math.min(size.width, size.height) * 0.25;
+    if (visible && !tiny) return;
+    const fits = Math.min((size.width - padding * 2) / Math.max(1, r.width), (size.height - padding * 2) / Math.max(1, r.height));
+    // pequeno demais: aproxima até caber (no máximo 100%); senão mantém o zoom, só afasta se não couber
+    const z = Math.max(0.02, tiny ? Math.min(1, fits) : Math.min(v.zoom, fits));
+    const to = { zoom: z, x: size.width / 2 - (r.x + r.width / 2) * z, y: size.height / 2 - (r.y + r.height / 2) * z };
+    const from = { ...v };
+    const start = performance.now();
+    cancelAnimationFrame(this.glide);
+    const step = () => {
+      // o usuário pegou a vista no meio do caminho: para aqui
+      if (this.userViewAt > start) return;
+      const t = Math.min(1, (performance.now() - start) / 450);
+      const k = 1 - Math.pow(1 - t, 3);
+      // zoom em escala logarítmica para a animação parecer uniforme
+      const zoom = Math.exp(Math.log(from.zoom) + (Math.log(to.zoom) - Math.log(from.zoom)) * k);
+      const c = { x: (size.width / 2 - from.x) / from.zoom + ((size.width / 2 - to.x) / to.zoom - (size.width / 2 - from.x) / from.zoom) * k, y: (size.height / 2 - from.y) / from.zoom + ((size.height / 2 - to.y) / to.zoom - (size.height / 2 - from.y) / from.zoom) * k };
+      this.setViewport({ zoom, x: size.width / 2 - c.x * zoom, y: size.height / 2 - c.y * zoom });
+      if (t < 1) this.glide = requestAnimationFrame(step);
+    };
+    this.glide = requestAnimationFrame(step);
   }
 
   fitRect(r: Rect, maxZoom = 1, padding = 80): void {

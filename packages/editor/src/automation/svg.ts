@@ -55,14 +55,51 @@ function parseTransform(s: string | null): Mat {
   return m;
 }
 
-/** Atributos + o que vier em style="…". */
-function attrsOf(el: Element): Record<string, string> {
+type CssRule = { selector: string; decls: Record<string, string> };
+
+function parseDecls(text: string): Record<string, string> {
   const out: Record<string, string> = {};
-  for (const a of Array.from(el.attributes)) out[a.name] = a.value;
-  for (const decl of (out.style ?? '').split(';')) {
+  for (const decl of text.split(';')) {
     const [k, ...v] = decl.split(':');
     if (k && v.length) out[k.trim()] = v.join(':').trim();
   }
+  return out;
+}
+
+/** Regras dos blocos <style> (comum em SVG exportado do Illustrator: `.st0{fill:#727575;}`). Só seletores simples. */
+function parseCss(root: Element): CssRule[] {
+  const rules: CssRule[] = [];
+  for (const st of Array.from(root.getElementsByTagName('style'))) {
+    const text = (st.textContent ?? '').replace(/\/\*[\s\S]*?\*\//g, '');
+    const re = /([^{}]+)\{([^}]*)\}/g;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(text))) {
+      const decls = parseDecls(m[2]);
+      for (const sel of m[1].split(',')) if (sel.trim()) rules.push({ selector: sel.trim(), decls });
+    }
+  }
+  return rules;
+}
+
+/** `tag`, `.classe`, `#id` e combinações como `path.st0` (sem descendentes nem pseudo-classes). */
+function matches(el: Element, selector: string): boolean {
+  if (!/^[a-zA-Z0-9_-]*([.#][a-zA-Z0-9_-]+)*$/.test(selector)) return false;
+  const tag = selector.match(/^[a-zA-Z0-9_-]+/)?.[0];
+  if (tag && el.tagName.toLowerCase().replace(/^svg:/, '') !== tag.toLowerCase()) return false;
+  const classes = (el.getAttribute('class') ?? '').split(/\s+/);
+  for (const part of selector.match(/[.#][a-zA-Z0-9_-]+/g) ?? []) {
+    if (part[0] === '.' && !classes.includes(part.slice(1))) return false;
+    if (part[0] === '#' && el.getAttribute('id') !== part.slice(1)) return false;
+  }
+  return true;
+}
+
+/** Atributos + regras de <style> + o que vier em style="…" (nessa ordem de prioridade, como no navegador). */
+function attrsOf(el: Element, css: CssRule[] = []): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const a of Array.from(el.attributes)) out[a.name] = a.value;
+  for (const r of css) if (matches(el, r.selector)) Object.assign(out, r.decls);
+  Object.assign(out, parseDecls(el.getAttribute('style') ?? ''));
   return out;
 }
 
@@ -80,7 +117,8 @@ export function svgToNodes(conv: Converter, spec: NodeSpec, geom: { x: number; y
   const doc = new DOMParser().parseFromString(String(spec.svg).trim(), 'image/svg+xml');
   const root = doc.documentElement;
   if (!root || root.tagName.toLowerCase() !== 'svg' || doc.getElementsByTagName('parsererror').length) throw new SpecError('SVG inválido (precisa começar com <svg>)');
-  const ra = attrsOf(root);
+  const css = parseCss(root);
+  const ra = attrsOf(root, css);
   const vb = (ra.viewBox ?? ra.viewbox ?? '').split(/[\s,]+/).map(Number);
   const vbW = vb.length === 4 && vb[2] > 0 ? vb[2] : parseFloat(ra.width) || 100;
   const vbH = vb.length === 4 && vb[3] > 0 ? vb[3] : parseFloat(ra.height) || 100;
@@ -107,13 +145,13 @@ export function svgToNodes(conv: Converter, spec: NodeSpec, geom: { x: number; y
     const href = (g.getAttribute('href') ?? g.getAttribute('xlink:href') ?? '').replace('#', '');
     if (!g.querySelector('stop') && href && defs.get(href)) stopsEl = defs.get(href)!;
     const stops = Array.from(stopsEl.querySelectorAll('stop')).map((st) => {
-      const a = attrsOf(st);
+      const a = attrsOf(st, css);
       const off = a.offset?.endsWith('%') ? parseFloat(a.offset) / 100 : parseFloat(a.offset ?? '0');
       const c = parseColor(a['stop-color'] === 'currentColor' ? current : a['stop-color'] ?? '#000000') ?? '#000000';
       return { offset: Math.max(0, Math.min(1, off || 0)), color: withAlpha(c, a['stop-opacity'] !== undefined ? parseFloat(a['stop-opacity']) : 1) };
     });
     if (stops.length < 2) return stops[0] ? { type: 'solid', color: stops[0].color } : null;
-    const a = attrsOf(g);
+    const a = attrsOf(g, css);
     const user = a.gradientUnits === 'userSpaceOnUse';
     const val = (v: string | undefined, d: number, size: number) => (v === undefined ? d : v.endsWith('%') ? (parseFloat(v) / 100) * (user ? size : 1) : parseFloat(v));
     const norm = (p: { x: number; y: number }) => {
@@ -137,7 +175,7 @@ export function svgToNodes(conv: Converter, spec: NodeSpec, geom: { x: number; y
   const visit = (el: Element, m: Mat, inh: Inherited) => {
     const tag = el.tagName.toLowerCase().replace(/^svg:/, '');
     if (['defs', 'clippath', 'mask', 'lineargradient', 'radialgradient', 'title', 'desc', 'metadata', 'style', 'symbol', 'pattern', 'filter'].includes(tag)) return;
-    const a = attrsOf(el);
+    const a = attrsOf(el, css);
     if (a.display === 'none' || a.visibility === 'hidden') return;
     const mm = multiply(m, parseTransform(a.transform ?? null));
     const num = (v: string | undefined, d: number) => (v === undefined || v === '' ? d : parseFloat(v));
@@ -212,7 +250,7 @@ export function svgToNodes(conv: Converter, spec: NodeSpec, geom: { x: number; y
   };
 
   const rootInh: Inherited = { fill: '#000000', stroke: null, strokeWidth: 1, opacity: 1, fillOpacity: 1, strokeOpacity: 1, fillRule: 'nonzero', cap: 'butt', join: 'miter', dash: null };
-  const rootAttrs = attrsOf(root);
+  const rootAttrs = attrsOf(root, css);
   if (rootAttrs.fill) rootInh.fill = rootAttrs.fill;
   if (rootAttrs.stroke) rootInh.stroke = rootAttrs.stroke;
   if (rootAttrs['stroke-width']) rootInh.strokeWidth = parseFloat(rootAttrs['stroke-width']);

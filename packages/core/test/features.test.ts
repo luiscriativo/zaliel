@@ -531,3 +531,46 @@ describe('propriedade booleana de componente', () => {
     expect(resolveInstance(padrao, find)!.children[0].visible).toBe(false);
   });
 });
+
+describe('constraints de escala em vetores', () => {
+  it('a instância menor encolhe o desenho do vetor junto com a caixa', () => {
+    const { doc, page } = setup();
+    const glifo = createNode('path', { x: 0, y: 0, width: 24, height: 24 }, { d: 'M0 12L24 12M12 0L12 24', constraints: { horizontal: 'scale', vertical: 'scale' } });
+    const comp = createNode('component', { x: 0, y: 0, width: 24, height: 24 }, { children: [glifo] });
+    page.children.push(comp);
+    const find = componentFinder(doc, () => [comp]);
+    const inst = createNode('instance', { x: 0, y: 40, width: 18, height: 18 }, { componentId: comp.id });
+    const r = resolveInstance(inst, find)!.children[0] as typeof glifo;
+    expect(r.width).toBe(18);
+    expect(r.d).toBe('M0 9 L18 9 M9 0 L9 18');
+  });
+});
+
+describe('constraints de escala em frames aninhados', () => {
+  it('o conteúdo de um frame de dentro também escala', () => {
+    const { doc, page } = setup();
+    const v = createNode('path', { x: 10, y: 0, width: 20, height: 10 }, { d: 'M0 0L20 10', constraints: { horizontal: 'scale', vertical: 'scale' } });
+    const arte = createNode('frame', { x: 0, y: 0, width: 40, height: 10 }, { children: [v], constraints: { horizontal: 'scale', vertical: 'scale' } });
+    const comp = createNode('component', { x: 0, y: 0, width: 40, height: 10 }, { children: [arte] });
+    page.children.push(comp);
+    const find = componentFinder(doc, () => [comp]);
+    const inst = createNode('instance', { x: 0, y: 40, width: 20, height: 5 }, { componentId: comp.id });
+    const a = resolveInstance(inst, find)!.children[0] as typeof arte;
+    expect(a.width).toBe(20);
+    const r = a.children[0] as typeof v;
+    expect([r.x, r.width, r.height]).toEqual([5, 10, 5]);
+    expect(r.d).toBe('M0 0 L10 5');
+  });
+});
+
+describe('camadas absolutas em auto layout', () => {
+  it('a borda absoluta estica junto com a instância de um componente com auto layout', () => {
+    const { doc, page } = setup();
+    const borda = createNode('rect', { x: 0, y: 0, width: 260, height: 40 }, { absolute: true, constraints: { horizontal: 'left-right', vertical: 'top-bottom' } });
+    const comp = createNode('component', { x: 0, y: 0, width: 260, height: 40 }, { layout: { direction: 'horizontal', gap: 8, padding: [0, 12, 0, 12], justify: 'start', align: 'center' }, children: [borda] });
+    page.children.push(comp);
+    const find = componentFinder(doc, () => [comp]);
+    const inst = createNode('instance', { x: 0, y: 60, width: 500, height: 40 }, { componentId: comp.id });
+    expect(resolveInstance(inst, find)!.children[0].width).toBe(500);
+  });
+});

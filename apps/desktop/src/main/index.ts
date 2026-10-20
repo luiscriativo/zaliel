@@ -178,6 +178,9 @@ function createWindow(openPath?: string): BrowserWindow {
       nodeIntegration: false,
       sandbox: false,
       spellcheck: false,
+      // o canvas só desenha quando algo muda; sem isto, no macOS a janela coberta por outra
+      // (ex.: acompanhando a automação ao lado de outro app) para o requestAnimationFrame e o canvas congela
+      backgroundThrottling: false,
     },
   };
   const win = new BrowserWindow(opts);

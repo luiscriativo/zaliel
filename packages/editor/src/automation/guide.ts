@@ -72,6 +72,7 @@ const ICONS = `# Icons, logos and illustrations
 - Icons: search_icons("bell") then {type:"icon", icon:"bell", size:20, color:"$text/muted", strokeWidth:2}. Lucide set (~1600 outline icons). Icons are editable vectors.
 - Custom icons, logos and illustrations: draw them as SVG and insert with {type:"svg", svg:"<svg viewBox='0 0 64 64'>…</svg>", width:64}. Paths, circles, rects, polygons, groups, transforms, gradients and opacity are converted to editable vector layers. Text inside SVG is not converted — draw letters as paths or use a text layer next to it.
 - Logo tips: simple geometric construction (circles, rounded squares, diagonals), 1–2 colors, works in one color, recognizable at 24px. Combine the mark with a wordmark text (weight 600–800, slight negative letterSpacing like -0.5).
+- Raw vector paths: {type:"path", d, fill, width, height} scales the drawing to fill the box; add viewBox:"0 0 24 24" to keep its position inside a fixed grid (icon sets with padding, like Material icons).
 - You can also build shapes from primitives and combine them with batch_design op "boolean" (union, subtract, intersect, exclude) and "flatten" to merge into one vector.`;
 
 const PROTOTYPE = `# Prototype

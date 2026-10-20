@@ -19,6 +19,7 @@ import {
   ROOT,
   walk,
   type SceneNode,
+  type Rect,
   type ContainerNode,
   type Op,
   type Style,
@@ -214,8 +215,71 @@ export function createAutomation(ed: Editor) {
       ed.notices = null;
       ctx.warnings.push(...notices.filter((n) => !n.startsWith('success') && !n.startsWith('info')));
     }
+    // o que o lote mudou, pelas operações do próprio passo de desfazer (vale para qualquer operação)
+    const step = ed.model.past.length > start ? ed.model.past[start] : undefined;
+    const changed = (step?.redo ?? []).map((o) => (o.op === 'insert' ? o.node.id : 'id' in o ? (o.id as string) : '')).filter(Boolean);
+    showAgent([...ctx.refs.values(), ...touchedIds(results), ...changed]);
     return { ok: true, created: Object.fromEntries(ctx.refs), results, ...(ctx.warnings.length ? { warnings: ctx.warnings } : {}) };
   }
+
+  /** Ids que aparecem nos resultados das operações ({ id }, { ids }). */
+  function touchedIds(v: unknown, out: string[] = []): string[] {
+    if (Array.isArray(v)) for (const x of v) touchedIds(x, out);
+    else if (v && typeof v === 'object') {
+      const o = v as Record<string, unknown>;
+      if (typeof o.id === 'string') out.push(o.id);
+      if (Array.isArray(o.ids)) for (const x of o.ids) if (typeof x === 'string') out.push(x);
+    }
+    return out;
+  }
+
+  /**
+   * Leva o cursor do agente até as camadas (da página aberta) e faz o percurso por dentro delas:
+   * a camada, depois as partes principais (seções, cartões, componentes), como quem está trabalhando ali.
+   * `look`: só está lendo ou capturando (contorno discreto).
+   */
+  function showAgent(list: string[], look = false): void {
+    const host = ed.host;
+    if (!host) return;
+    const idx = ed.model.index;
+    // tudo o que mudou está em outra página: a vista vai para lá (se o usuário não está mexendo nela)
+    const alive = list.filter((id) => idx.get(id));
+    if (alive.length && !alive.some((id) => idx.pageOf(id) === ed.pageId) && performance.now() - ed.userViewAt >= 4000) {
+      const other = idx.pageOf(alive[0]);
+      if (other) ed.setPage(other);
+    }
+    const set = new Set(alive.filter((id) => idx.pageOf(id) === ed.pageId));
+    const tops = [...set].filter((id) => !idx.ancestors(id).some((a) => set.has(a.id)));
+    if (!tops.length) return;
+    const summary = tops.map((id) => ed.worldBounds(id));
+    // percurso: cada camada e, por dentro, as partes grandes o bastante para se notar (em largura)
+    const steps: Rect[] = [];
+    const inner = (n: SceneNode): SceneNode[] => (n.type === 'instance' ? (n.slots ?? []).flatMap((h) => h.children) : 'children' in n ? n.children : []);
+    for (const id of tops.slice(0, 6)) {
+      const top = idx.get(id)!;
+      const tb = ed.worldBounds(id);
+      steps.push(tb);
+      let level = inner(top);
+      for (let depth = 0; depth < 4 && level.length && steps.length < 14; depth++) {
+        const next: SceneNode[] = [];
+        for (const n of level) {
+          if (n.visible === false || !idx.get(n.id)) continue;
+          const b = ed.worldBounds(n.id);
+          const big = b.width * b.height > 1600;
+          // camadas que só embrulham (do tamanho do pai) não contam como passo: entra nelas
+          const wrapper = inner(n).length > 0 && b.width >= tb.width * 0.95 && b.height >= tb.height * 0.95;
+          if (big && !wrapper && steps.length < 14) steps.push(b);
+          next.push(...inner(n));
+        }
+        level = next;
+      }
+    }
+    host.agent.visit(ed.pageId, steps, summary, look);
+    // a vista acompanha onde o agente está mexendo (a camada principal, a primeira da lista)
+    ed.glideTo(summary[0]);
+    host.invalidate();
+  }
+
 
   async function runOp(op: Record<string, unknown>, ctx: BuildContext, conv: Converter, assets: () => Op[]): Promise<unknown> {
     const kind = String(op.op ?? op.type ?? '');
@@ -261,6 +325,8 @@ export function createAutomation(ed: Editor) {
         for (const spec of specs) {
           const top = parent === ed.pageId;
           const built = conv.build(spec, hasLayout(parent), top);
+          const holder = idx.get(parent);
+          if (holder?.type === 'component-set') conv.intoSet(built, spec, holder as ContainerNode);
           // frame novo no topo sem posição: vai para um lugar livre
           if (top && spec.x === undefined && spec.y === undefined) {
             const at = emptySpace(built.width, built.height);
@@ -1179,6 +1245,7 @@ ${NODE_HELP}`,
         ed.select(list);
         const b = unionRects(list.map((id) => ed.worldBounds(id)));
         ed.fitRect(b, 1, 60);
+        showAgent(list);
         return { ok: true };
       },
     },
@@ -1218,6 +1285,14 @@ ${NODE_HELP}`,
     const tool = byName.get(name);
     if (!tool) return { content: [{ type: 'text', text: `Ferramenta desconhecida: ${name}` }], isError: true };
     try {
+      ed.host?.agent.busy();
+      // leituras e capturas de uma camada: o cursor vai até ela, só olhando
+      if (ed.doc && ['get_screenshot', 'inspect_layout', 'read_nodes', 'export_nodes', 'analyze_design'].includes(name)) {
+        const raw = [args?.id, ...(Array.isArray(args?.ids) ? args.ids : []), args?.parent].filter((v) => typeof v === 'string') as string[];
+        const ctx = new BuildContext(ed);
+        const ids = raw.map((r) => ctx.id(r)).filter((v): v is string => !!v && !!ed.model.index.get(v));
+        if (ids.length) showAgent(ids, true);
+      }
       const res = await tool.run(args ?? {});
       if (res && typeof res === 'object' && 'content' in (res as object)) return res as ToolResult;
       return { content: [{ type: 'text', text: JSON.stringify(res, null, 1) }] };

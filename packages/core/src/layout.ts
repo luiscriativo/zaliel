@@ -2,6 +2,7 @@
 // medida de textos e constraints. Tudo puro: recebe nós e devolve as mudanças.
 import type { AutoLayout, ContainerNode, InstanceNode, SceneNode, TextNode } from './types';
 import { boundsOf, nodeMatrix, apply, rectCorners } from './util';
+import { scalePath } from './vector';
 
 export interface Change {
   id: string;
@@ -290,6 +291,7 @@ export function applyConstraints(frame: ContainerNode, oldW: number, oldH: numbe
     if (frame.layout && !c.absolute) continue; // em auto layout só os absolutos seguem constraints
     const h = c.constraints?.horizontal ?? 'left';
     const v = c.constraints?.vertical ?? 'top';
+    const w0 = c.width, h0 = c.height;
     if (h === 'right') set(ctx, c, 'x', c.x + dw);
     else if (h === 'center') set(ctx, c, 'x', c.x + dw / 2);
     else if (h === 'left-right') set(ctx, c, 'width', c.width + dw);
@@ -306,5 +308,14 @@ export function applyConstraints(frame: ContainerNode, oldW: number, oldH: numbe
       set(ctx, c, 'y', c.y * k);
       set(ctx, c, 'height', c.height * k);
     }
+    const resized = c.width !== w0 || c.height !== h0;
+    // o desenho do vetor está nas coordenadas da caixa: acompanha a caixa (escala ou esticar)
+    if (c.type === 'path' && w0 && h0 && resized) {
+      const d = scalePath(c.d, c.width / w0, c.height / h0);
+      ctx.changes.push({ id: c.id, key: 'd', old: c.d, value: d });
+      c.d = d;
+    }
+    // frame de dentro que mudou de tamanho: os filhos dele seguem as próprias constraints (como no Figma)
+    if (resized && (c.type === 'frame' || c.type === 'component') && !c.layout) applyConstraints(c, w0, h0, ctx);
   }
 }

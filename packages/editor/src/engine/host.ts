@@ -5,6 +5,7 @@ import type { ContainerNode, SceneNode, TextNode } from '@zaliel/core';
 import type { Editor } from '../editor';
 import { drawOverlay } from './overlay';
 import type { Interaction } from './interaction';
+import { AgentPresence } from './agent';
 
 export interface HostAssets {
   wasmUrl: string;
@@ -24,6 +25,9 @@ export class CanvasHost {
   fonts: FontRegistry;
   canvas: HTMLCanvasElement | null = null;
   interaction: Interaction | null = null;
+  /** Cursor de quem automatiza o editor (aparece quando a automação muda algo). */
+  agent = new AgentPresence();
+  private agentTimer = 0;
   /** Onde ficou o nome de cada frame do topo no último desenho (px de tela), para clicar nele. */
   frameLabels: { id: string; x: number; y: number; width: number; angle: number }[] = [];
   private raf = 0;
@@ -71,6 +75,8 @@ export class CanvasHost {
 
   unmount(): void {
     cancelAnimationFrame(this.raf);
+    // sem zerar, um quadro cancelado aqui deixa `invalidate` ignorando todo pedido depois de montar de novo
+    this.raf = 0;
     this.canvas?.removeEventListener('webglcontextlost', this.onLost);
     this.renderer.surface?.delete();
     this.renderer.surface = null;
@@ -130,6 +136,15 @@ export class CanvasHost {
       this.draw();
     });
   };
+
+  /** Pede o próximo quadro do cursor do agente: já (animando) ou só quando o desvanecimento começar. */
+  scheduleAgentFrame(): void {
+    const wait = this.agent.nextFrame();
+    clearTimeout(this.agentTimer);
+    if (wait === null) return;
+    if (wait === 0) this.invalidate();
+    else this.agentTimer = window.setTimeout(this.invalidate, wait + 16);
+  }
 
   draw(): void {
     const e = this.editor;

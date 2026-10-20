@@ -9,6 +9,7 @@ import {
   findStyle,
   allStyles,
   stylePatch,
+  detachPatch,
   propertyDefs,
   findVariant,
   variantName,
@@ -104,6 +105,8 @@ export interface NodeSpec {
   innerRadius?: number;
   d?: string;
   fillRule?: string;
+  /** Caminho: área de desenho de \`d\` ("0 0 24 24"); o desenho mantém a posição dentro dela (largura/altura = tamanho da área). */
+  viewBox?: string | number[];
   // ícone, imagem, svg
   icon?: string;
   strokeWidth?: number;
@@ -692,6 +695,17 @@ export class Converter {
     return node;
   }
 
+  /** Componente criado dentro de um conjunto de variantes que já existe: vira variante e liga as filhas às propriedades do conjunto. */
+  intoSet(c: SceneNode, spec: NodeSpec, set: ContainerNode): void {
+    if (c.type !== 'component') throw new SpecError('um conjunto de variantes só pode ter componentes dentro');
+    const v = (spec.variant ?? parseVariantName(c.name)) as Record<string, string> | null;
+    if (!v || !Object.keys(v).length) throw new SpecError('a variante precisa de "variant" (ex.: {"Tipo": "Primário"})');
+    c.variant = v;
+    c.name = variantName(v);
+    const propIds = new Map((set.properties ?? []).map((p) => [p.name.toLowerCase(), p.id]));
+    if (propIds.size) bindProps(c, spec.children ?? [], propIds, this.ctx);
+  }
+
   private container(type: 'frame' | 'component' | 'component-set' | 'group', spec: NodeSpec, geom: { x: number; y: number; width: number; height: number }, top: boolean): ContainerNode {
     const isSet = type === 'component-set';
     const layout = this.layout(spec.layout ?? (isSet ? { direction: 'horizontal', gap: 20, padding: 20, wrap: true } : undefined));
@@ -831,6 +845,21 @@ export class Converter {
   private path(spec: NodeSpec, geom: { x: number; y: number; width: number; height: number }): PathNode {
     if (!spec.d) throw new SpecError('caminho sem "d"');
     const host = this.ed.host;
+    // com viewBox, o desenho fica onde está dentro da caixa (ícones de 24×24 com margem, por exemplo)
+    const vb = typeof spec.viewBox === 'string' ? spec.viewBox.split(/[\s,]+/).map(Number) : Array.isArray(spec.viewBox) ? spec.viewBox.map(Number) : null;
+    if (vb && vb.length === 4 && vb[2] > 0 && vb[3] > 0) {
+      const w = typeof spec.width === 'number' ? spec.width : vb[2], h = typeof spec.height === 'number' ? spec.height : vb[3];
+      const sx = w / vb[2], sy = h / vb[3];
+      const placed = host?.normalizePath(spec.d, [sx, 0, 0, sy, -vb[0] * sx, -vb[1] * sy], spec.fillRule === 'evenodd');
+      if (!placed) throw new SpecError('caminho SVG inválido');
+      return createNode('path', { x: geom.x + placed.x, y: geom.y + placed.y, width: Math.max(0.01, placed.width), height: Math.max(0.01, placed.height) }, {
+        d: placed.d,
+        name: 'Vetor',
+        fills: this.paints(spec.fill ?? spec.color ?? '#1d1c1a'),
+        strokes: [],
+        ...(spec.fillRule === 'evenodd' ? { fillRule: 'evenodd' as const } : {}),
+      });
+    }
     const norm = host?.normalizePath(spec.d, [1, 0, 0, 1, 0, 0], spec.fillRule === 'evenodd');
     if (!norm) throw new SpecError('caminho SVG inválido');
     // com largura/altura, o desenho é escalado para caber
@@ -1028,9 +1057,16 @@ export class Converter {
       if (!name) continue;
       const st = this.style(slot, name)!;
       if (slot === 'text' && n.type !== 'text') throw new SpecError('textStyle só vale para textos');
+      const before = n.type === 'text' ? { ...n.style } : null;
       Object.assign(n, stylePatch(n, st, slot));
       // alinhamento e o que vier explícito continuam valendo por cima do estilo de texto
-      if (slot === 'text' && n.type === 'text') n.style = { ...n.style, ...(spec.align ? { align: spec.align as TextStyle['align'] } : {}) };
+      if (slot === 'text' && n.type === 'text' && before) {
+        const keys: [keyof NodeSpec, keyof TextStyle][] = [['font', 'family'], ['size', 'size'], ['weight', 'weight'], ['lineHeight', 'lineHeight'], ['letterSpacing', 'letterSpacing'], ['italic', 'italic']];
+        const own = keys.filter(([k]) => spec[k] !== undefined);
+        n.style = { ...n.style, ...Object.fromEntries(own.map(([, t]) => [t, before[t]])), ...(spec.align ? { align: spec.align as TextStyle['align'] } : {}) };
+        // valor diferente do estilo: o nó deixa de seguir o estilo (como na edição à mão)
+        if (own.length) n.styles = detachPatch(n, 'text').styles as SceneNode['styles'];
+      }
     }
   }
 

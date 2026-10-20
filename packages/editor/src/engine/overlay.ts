@@ -488,6 +488,8 @@ export function drawOverlay(host: CanvasHost, canvas: Canvas, ck: CanvasKit): vo
     }
   }
 
+  drawAgent(host, canvas, ck, fill, stroke);
+
   // réguas
   if (ed.settings.rulers) drawRulers(host, canvas, ck, fill, stroke);
 
@@ -496,6 +498,49 @@ export function drawOverlay(host: CanvasHost, canvas: Canvas, ck: CanvasKit): vo
 
 
 type PaintFn = (color: string, alpha?: number) => SkPaint;
+
+/** Cursor de quem automatiza: contorno do que mudou, seta e etiqueta com o nome. */
+function drawAgent(host: CanvasHost, canvas: Canvas, ck: CanvasKit, fill: PaintFn, stroke: (color: string, width?: number, alpha?: number) => SkPaint) {
+  const ed = host.editor;
+  const a = host.agent;
+  host.scheduleAgentFrame();
+  if (!a.onPage(ed.pageId)) return;
+  const now = performance.now();
+  for (const h of a.highlights(now)) {
+    const r = h.rect;
+    const p0 = ed.worldToScreen({ x: r.x, y: r.y }), p1 = ed.worldToScreen({ x: r.x + r.width, y: r.y + r.height });
+    const rect = ck.LTRBRect(p0.x, p0.y, p1.x, p1.y);
+    if (h.strong) canvas.drawRect(rect, fill(a.color, 0.08 * h.alpha));
+    canvas.drawRect(rect, stroke(a.color, h.strong ? 2 : 1, h.alpha));
+  }
+  const o = a.opacity(now);
+  const w = a.position(now);
+  if (o <= 0 || !w) return;
+  const p = ed.worldToScreen(w);
+  // seta clássica de cursor, com borda branca
+  const b = new ck.PathBuilder();
+  const k = 0.7;
+  const pts: [number, number][] = [[0, 0], [0, 17], [4.5, 13], [7.5, 20], [10.5, 18.8], [7.6, 12], [13.5, 12]];
+  b.moveTo(p.x + pts[0][0] * k, p.y + pts[0][1] * k);
+  for (const [x, y] of pts.slice(1)) b.lineTo(p.x + x * k, p.y + y * k);
+  b.close();
+  const arrow = b.detachAndDelete();
+  canvas.drawPath(arrow, fill(a.color, o));
+  canvas.drawPath(arrow, stroke('#ffffff', 1, o));
+  arrow.delete();
+  // etiqueta com o nome
+  const text = label(host, a.name, '#ffffff', 10, 600);
+  const tw = text.getMaxIntrinsicWidth(), th = text.getHeight();
+  const x = p.x + 10, y = p.y + 13;
+  const tag = ck.RRectXY(ck.LTRBRect(x, y, x + tw + 10, y + th + 4), 4, 4);
+  canvas.drawRRect(tag, fill(a.color, o));
+  if (o >= 1) canvas.drawParagraph(text, x + 5, y + 2);
+  else {
+    canvas.saveLayer(fill('#000000', o));
+    canvas.drawParagraph(text, x + 5, y + 2);
+    canvas.restore();
+  }
+}
 
 /** Réguas em cima e à esquerda, com a faixa da seleção destacada. */
 function drawRulers(host: CanvasHost, canvas: Canvas, ck: CanvasKit, fill: PaintFn, stroke: (color: string, width?: number, alpha?: number) => SkPaint) {

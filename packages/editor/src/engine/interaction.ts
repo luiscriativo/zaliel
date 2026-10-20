@@ -405,6 +405,7 @@ export class Interaction {
         this.redraw();
         break;
       case 'pan':
+        ed.userViewAt = performance.now();
         ed.setViewport({ zoom: ed.viewport.zoom, x: d.vx + (p.x - d.start.x), y: d.vy + (p.y - d.start.y) });
         break;
       case 'marquee': {
@@ -559,6 +560,7 @@ export class Interaction {
     if (ed.home) return;
     e.preventDefault();
     const p = this.local(e);
+    ed.userViewAt = performance.now();
     if (e.ctrlKey || e.metaKey) {
       // pinça do touchpad chega como ctrl+roda
       const factor = Math.exp(-e.deltaY * (e.deltaMode === 1 ? 0.05 : 0.0025) * (Math.abs(e.deltaY) > 50 ? 1 : 2));
@@ -972,8 +974,8 @@ export class Interaction {
       if (changedH && s.vertical === 'fill') s.vertical = 'fixed';
       if (s.horizontal !== cur.sizing.horizontal || s.vertical !== cur.sizing.vertical) ops.push({ op: 'set', id: n0.id, key: 'sizing', value: s });
     }
-    // constraints dos filhos (frames sem auto layout)
-    if ((cur.type === 'frame' || cur.type === 'component') && !cur.layout) {
+    // constraints dos filhos (em auto layout, só as camadas absolutas seguem)
+    if (cur.type === 'frame' || cur.type === 'component') {
       const copy = clone(cur) as ContainerNode;
       copy.width = w;
       copy.height = h;
